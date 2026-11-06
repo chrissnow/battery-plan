@@ -1,0 +1,335 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery Plan",
+        "description": "Plans battery charging and export against your Octopus tariff. Give this planner a name.",
+        "data": {
+          "name": "Name"
+        }
+      },
+      "settings": {
+        "title": "Settings",
+        "description": "Pick your battery and Octopus Energy integration entities. Everything can be changed later under Configure.",
+        "sections": {
+          "battery": {
+            "name": "Battery",
+            "data": {
+              "soc_entity": "Battery SOC sensor",
+              "capacity_kwh": "Usable capacity",
+              "target_soc": "Charge target",
+              "reserve_soc": "Export floor",
+              "min_soc": "Minimum SOC"
+            },
+            "data_description": {
+              "soc_entity": "Battery state of charge (%).",
+              "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
+              "target_soc": "SOC the overnight charge aims for.",
+              "reserve_soc": "Planned exports stop at this SOC so the house can run until the next charge.",
+              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid."
+            }
+          },
+          "tariff": {
+            "name": "Tariff",
+            "data": {
+              "import_rates": "Import rate events",
+              "export_rates": "Export rate events",
+              "standing_charge_entity": "Standing charge sensor"
+            },
+            "data_description": {
+              "import_rates": "Octopus Energy integration events, e.g. …_current_day_rates and …_next_day_rates (import meter).",
+              "export_rates": "The same events for the export meter (Agile Outgoing). Leave empty if you don't export.",
+              "standing_charge_entity": "Optional: daily standing charge (…_current_standing_charge), subtracted from daily net."
+            }
+          },
+          "charging": {
+            "name": "Overnight charging",
+            "data": {
+              "charge_start": "Charge window start",
+              "charge_hours": "Charge window length",
+              "charge_mode": "Charge rate",
+              "max_charge_kw": "Maximum charge power",
+              "min_charge_kw": "Minimum charge power",
+              "makeup_kw": "Make-up power",
+              "finish_early_min": "Finish early (target below 100%)",
+              "finish_early_full_min": "Finish early (target 100%)",
+              "long_balance_day": "Long balance night",
+              "long_balance_min": "Long balance finish early",
+              "charge_eff": "Charge efficiency"
+            },
+            "data_description": {
+              "charge_start": "Start of the cheap-rate grid-charge window.",
+              "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
+              "max_charge_kw": "Battery-side charge power at full rate.",
+              "min_charge_kw": "Spread mode never charges slower than this.",
+              "makeup_kw": "Spread mode adds this on top of the calculated rate.",
+              "finish_early_min": "Spread mode aims to finish this long before the window ends.",
+              "finish_early_full_min": "Used instead when the target is 100%, to allow time to balance.",
+              "long_balance_day": "Optional: the night (window start day) that finishes even earlier.",
+              "charge_eff": "Grid AC to battery, used for import energy and cost estimates."
+            }
+          },
+          "export": {
+            "name": "Export",
+            "data": {
+              "max_export_kw": "Maximum export power",
+              "saving_export_kw": "Saving session export power",
+              "min_export_price": "Minimum export price",
+              "discharge_eff": "Discharge efficiency"
+            },
+            "data_description": {
+              "max_export_kw": "Grid-side export power when exporting.",
+              "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
+              "min_export_price": "Only export in slots paying at least this.",
+              "discharge_eff": "Battery to AC."
+            }
+          },
+          "load": {
+            "name": "House load",
+            "data": {
+              "load_entities": "House load power sensors",
+              "load_days": "Days of history",
+              "load_kw": "Flat load"
+            },
+            "data_description": {
+              "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
+              "load_days": "Days of statistics used for the load profile.",
+              "load_kw": "Used when no load sensors are set, or for hours with no data."
+            }
+          },
+          "octopus": {
+            "name": "Intelligent Octopus & Octoplus",
+            "data": {
+              "dispatching_entity": "IOG dispatching sensor",
+              "dispatch_charges_battery": "Dispatches charge the battery",
+              "target_time_entity": "IOG ready time",
+              "saving_calendar": "Saving session calendar",
+              "free_calendar": "Free electricity calendar"
+            },
+            "data_description": {
+              "dispatching_entity": "Optional: …_intelligent_dispatching binary sensor; its planned dispatches are added to the plan.",
+              "dispatch_charges_battery": "Treat dispatches outside the charge window as full-rate battery top-ups.",
+              "target_time_entity": "Optional: …_intelligent_target_time select/time entity, for the dispatch-hours sensors.",
+              "saving_calendar": "Optional: Octoplus saving sessions calendar.",
+              "free_calendar": "Optional: Octoplus free electricity / power-up calendar."
+            }
+          },
+          "actuals": {
+            "name": "Actual costs",
+            "data": {
+              "grid_power_entity": "Grid power sensor",
+              "grid_power_invert": "Invert grid power"
+            },
+            "data_description": {
+              "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
+              "grid_power_invert": "Turn on if your sensor reports export as positive."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "reserve_above_target": "The export floor must be below the charge target.",
+      "min_above_reserve": "Minimum SOC must not be above the export floor.",
+      "min_charge_above_max": "Minimum charge power must not exceed the maximum."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Battery Plan settings",
+        "sections": {
+          "battery": {
+            "name": "Battery",
+            "data": {
+              "soc_entity": "Battery SOC sensor",
+              "capacity_kwh": "Usable capacity",
+              "target_soc": "Charge target",
+              "reserve_soc": "Export floor",
+              "min_soc": "Minimum SOC"
+            },
+            "data_description": {
+              "soc_entity": "Battery state of charge (%).",
+              "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
+              "target_soc": "SOC the overnight charge aims for.",
+              "reserve_soc": "Planned exports stop at this SOC so the house can run until the next charge.",
+              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid."
+            }
+          },
+          "tariff": {
+            "name": "Tariff",
+            "data": {
+              "import_rates": "Import rate events",
+              "export_rates": "Export rate events",
+              "standing_charge_entity": "Standing charge sensor"
+            },
+            "data_description": {
+              "import_rates": "Octopus Energy integration events, e.g. …_current_day_rates and …_next_day_rates (import meter).",
+              "export_rates": "The same events for the export meter (Agile Outgoing). Leave empty if you don't export.",
+              "standing_charge_entity": "Optional: daily standing charge (…_current_standing_charge), subtracted from daily net."
+            }
+          },
+          "charging": {
+            "name": "Overnight charging",
+            "data": {
+              "charge_start": "Charge window start",
+              "charge_hours": "Charge window length",
+              "charge_mode": "Charge rate",
+              "max_charge_kw": "Maximum charge power",
+              "min_charge_kw": "Minimum charge power",
+              "makeup_kw": "Make-up power",
+              "finish_early_min": "Finish early (target below 100%)",
+              "finish_early_full_min": "Finish early (target 100%)",
+              "long_balance_day": "Long balance night",
+              "long_balance_min": "Long balance finish early",
+              "charge_eff": "Charge efficiency"
+            },
+            "data_description": {
+              "charge_start": "Start of the cheap-rate grid-charge window.",
+              "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
+              "max_charge_kw": "Battery-side charge power at full rate.",
+              "min_charge_kw": "Spread mode never charges slower than this.",
+              "makeup_kw": "Spread mode adds this on top of the calculated rate.",
+              "finish_early_min": "Spread mode aims to finish this long before the window ends.",
+              "finish_early_full_min": "Used instead when the target is 100%, to allow time to balance.",
+              "long_balance_day": "Optional: the night (window start day) that finishes even earlier.",
+              "charge_eff": "Grid AC to battery, used for import energy and cost estimates."
+            }
+          },
+          "export": {
+            "name": "Export",
+            "data": {
+              "max_export_kw": "Maximum export power",
+              "saving_export_kw": "Saving session export power",
+              "min_export_price": "Minimum export price",
+              "discharge_eff": "Discharge efficiency"
+            },
+            "data_description": {
+              "max_export_kw": "Grid-side export power when exporting.",
+              "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
+              "min_export_price": "Only export in slots paying at least this.",
+              "discharge_eff": "Battery to AC."
+            }
+          },
+          "load": {
+            "name": "House load",
+            "data": {
+              "load_entities": "House load power sensors",
+              "load_days": "Days of history",
+              "load_kw": "Flat load"
+            },
+            "data_description": {
+              "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
+              "load_days": "Days of statistics used for the load profile.",
+              "load_kw": "Used when no load sensors are set, or for hours with no data."
+            }
+          },
+          "octopus": {
+            "name": "Intelligent Octopus & Octoplus",
+            "data": {
+              "dispatching_entity": "IOG dispatching sensor",
+              "dispatch_charges_battery": "Dispatches charge the battery",
+              "target_time_entity": "IOG ready time",
+              "saving_calendar": "Saving session calendar",
+              "free_calendar": "Free electricity calendar"
+            },
+            "data_description": {
+              "dispatching_entity": "Optional: …_intelligent_dispatching binary sensor; its planned dispatches are added to the plan.",
+              "dispatch_charges_battery": "Treat dispatches outside the charge window as full-rate battery top-ups.",
+              "target_time_entity": "Optional: …_intelligent_target_time select/time entity, for the dispatch-hours sensors.",
+              "saving_calendar": "Optional: Octoplus saving sessions calendar.",
+              "free_calendar": "Optional: Octoplus free electricity / power-up calendar."
+            }
+          },
+          "actuals": {
+            "name": "Actual costs",
+            "data": {
+              "grid_power_entity": "Grid power sensor",
+              "grid_power_invert": "Invert grid power"
+            },
+            "data_description": {
+              "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
+              "grid_power_invert": "Turn on if your sensor reports export as positive."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "reserve_above_target": "The export floor must be below the charge target.",
+      "min_above_reserve": "Minimum SOC must not be above the export floor.",
+      "min_charge_above_max": "Minimum charge power must not exceed the maximum."
+    }
+  },
+  "selector": {
+    "charge_mode": {
+      "options": {
+        "spread": "Spread to finish just before the window ends",
+        "max": "Full power"
+      }
+    },
+    "weekday": {
+      "options": {
+        "none": "None",
+        "mon": "Monday",
+        "tue": "Tuesday",
+        "wed": "Wednesday",
+        "thu": "Thursday",
+        "fri": "Friday",
+        "sat": "Saturday",
+        "sun": "Sunday"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "soc_at_next_charge": {
+        "name": "SOC at next charge"
+      },
+      "min_soc_ahead": {
+        "name": "Lowest SOC ahead"
+      },
+      "next_action": {
+        "name": "Next action",
+        "state": {
+          "self": "House on battery",
+          "charge": "Charge",
+          "hold": "Hold",
+          "iog": "IOG top-up",
+          "export": "Export",
+          "saving": "Saving session export",
+          "grid": "Battery at minimum"
+        }
+      },
+      "planned_export": {
+        "name": "Planned export"
+      },
+      "net_today_estimate": {
+        "name": "Net today estimate"
+      },
+      "net_tomorrow_plan": {
+        "name": "Net tomorrow plan"
+      },
+      "dispatch_hours_before_ready": {
+        "name": "Dispatch hours before ready"
+      },
+      "import_cost_today": {
+        "name": "Import cost today"
+      },
+      "export_value_today": {
+        "name": "Export earnings today"
+      },
+      "net_today": {
+        "name": "Net today"
+      },
+      "net_yesterday": {
+        "name": "Net yesterday"
+      }
+    },
+    "binary_sensor": {
+      "final_slot_scheduled": {
+        "name": "Final slot scheduled"
+      }
+    }
+  }
+}

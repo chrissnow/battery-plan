@@ -1,0 +1,22 @@
+{
+  "domain": "battery_plan",
+  "name": "Battery Plan",
+  "after_dependencies": [
+    "calendar",
+    "frontend"
+  ],
+  "codeowners": [
+    "@chrissnow"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "recorder"
+  ],
+  "documentation": "https://github.com/chrissnow/battery-plan",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/chrissnow/battery-plan/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

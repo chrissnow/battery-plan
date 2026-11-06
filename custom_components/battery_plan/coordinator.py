@@ -1,0 +1,426 @@
+"""Data coordinator: gathers HA state, runs the planner, tracks actual costs."""
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
+import logging
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
+
+from . import planner as P
+from .const import (
+    CONF_CAPACITY_KWH,
+    CONF_CHARGE_EFF,
+    CONF_CHARGE_HOURS,
+    CONF_CHARGE_MODE,
+    CONF_CHARGE_START,
+    CONF_DISCHARGE_EFF,
+    CONF_DISPATCH_CHARGES,
+    CONF_DISPATCHING_ENTITY,
+    CONF_EXPORT_RATES,
+    CONF_FINISH_EARLY_FULL_MIN,
+    CONF_FINISH_EARLY_MIN,
+    CONF_FREE_CALENDAR,
+    CONF_GRID_POWER_ENTITY,
+    CONF_GRID_POWER_INVERT,
+    CONF_IMPORT_RATES,
+    CONF_LOAD_DAYS,
+    CONF_LOAD_ENTITIES,
+    CONF_LOAD_KW,
+    CONF_LONG_BALANCE_DAY,
+    CONF_LONG_BALANCE_MIN,
+    CONF_MAKEUP_KW,
+    CONF_MAX_CHARGE_KW,
+    CONF_MAX_EXPORT_KW,
+    CONF_MIN_CHARGE_KW,
+    CONF_MIN_EXPORT_PRICE,
+    CONF_MIN_SOC,
+    CONF_RESERVE_SOC,
+    CONF_SAVING_CALENDAR,
+    CONF_SAVING_EXPORT_KW,
+    CONF_SOC_ENTITY,
+    CONF_STANDING_CHARGE,
+    CONF_TARGET_SOC,
+    CONF_TARGET_TIME_ENTITY,
+    DEFAULTS,
+    DOMAIN,
+    LOAD_PROFILE_REFRESH,
+    UPDATE_INTERVAL,
+    WEEKDAYS,
+)
+
+_LOGGER = logging.getLogger(__name__)
+BAD = (None, "", STATE_UNKNOWN, STATE_UNAVAILABLE)
+
+
+def _as_dt(v: Any) -> datetime | None:
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, str):
+        d = dt_util.parse_datetime(v)
+        if d is not None and d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+    return None
+
+
+def _float(v: Any, default: float | None = None) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _secs(v: Any, default: str) -> int:
+    t = dt_util.parse_time(str(v or default)) or dt_util.parse_time(default)
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+
+class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Runs the plan every few minutes and on tariff/dispatch changes."""
+
+    config_entry: ConfigEntry
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, _LOGGER, config_entry=entry, name=DOMAIN, update_interval=UPDATE_INTERVAL)
+        self.opts: dict[str, Any] = {**DEFAULTS, **entry.options}
+        self._load: list[float] | None = None
+        self._load_at: datetime | None = None
+        self._load_source = "flat"
+        self.costs = CostTracker(hass, entry, self)
+
+    # ---------- configuration ----------
+    def planner_config(self) -> P.PlannerConfig:
+        o = self.opts
+        lb = o.get(CONF_LONG_BALANCE_DAY, "none")
+        return P.PlannerConfig(
+            capacity_kwh=float(o[CONF_CAPACITY_KWH]),
+            target_soc=float(o[CONF_TARGET_SOC]),
+            reserve_soc=float(o[CONF_RESERVE_SOC]),
+            min_soc=float(o[CONF_MIN_SOC]),
+            charge_start=_secs(o.get(CONF_CHARGE_START), "23:30:00"),
+            charge_duration=int(float(o[CONF_CHARGE_HOURS]) * 3600),
+            charge_mode=o[CONF_CHARGE_MODE],
+            max_charge_kw=float(o[CONF_MAX_CHARGE_KW]),
+            min_charge_kw=float(o[CONF_MIN_CHARGE_KW]),
+            makeup_kw=float(o[CONF_MAKEUP_KW]),
+            finish_early_min=float(o[CONF_FINISH_EARLY_MIN]),
+            finish_early_full_min=float(o[CONF_FINISH_EARLY_FULL_MIN]),
+            long_balance_weekday=None if lb in (None, "none") else WEEKDAYS.index(lb) - 1,
+            long_balance_min=float(o[CONF_LONG_BALANCE_MIN]),
+            max_export_kw=float(o[CONF_MAX_EXPORT_KW]),
+            saving_export_kw=_float(o.get(CONF_SAVING_EXPORT_KW)),
+            min_export_price=float(o[CONF_MIN_EXPORT_PRICE]),
+            discharge_eff=float(o[CONF_DISCHARGE_EFF]),
+            charge_eff=float(o[CONF_CHARGE_EFF]),
+            dispatch_charges_battery=bool(o[CONF_DISPATCH_CHARGES]),
+        )
+
+    def watched_entities(self) -> list[str]:
+        """Entities whose change should trigger a re-plan."""
+        o = self.opts
+        ids: list[str] = [*o.get(CONF_IMPORT_RATES, []), *o.get(CONF_EXPORT_RATES, [])]
+        for k in (CONF_DISPATCHING_ENTITY, CONF_TARGET_TIME_ENTITY):
+            if o.get(k):
+                ids.append(o[k])
+        return ids
+
+    # ---------- input readers ----------
+    def rates(self, entity_ids: Iterable[str]) -> list[P.Rate]:
+        out: dict[datetime, P.Rate] = {}
+        for eid in entity_ids:
+            st = self.hass.states.get(eid)
+            if st is None:
+                continue
+            for r in st.attributes.get("rates") or []:
+                s, e = _as_dt(r.get("start")), _as_dt(r.get("end"))
+                v = _float(r.get("value_inc_vat"))
+                if s and e and v is not None:
+                    out[s] = P.Rate(s, e, v)
+        return [out[k] for k in sorted(out)]
+
+    def dispatches(self) -> list[tuple[datetime, datetime]]:
+        eid = self.opts.get(CONF_DISPATCHING_ENTITY)
+        st = self.hass.states.get(eid) if eid else None
+        if st is None:
+            return []
+        out = []
+        for d in st.attributes.get("planned_dispatches") or []:
+            s, e = _as_dt(d.get("start")), _as_dt(d.get("end"))
+            if s and e and e > s:
+                out.append((s, e))
+        return sorted(out)
+
+    def ready_time(self, now: datetime) -> datetime | None:
+        eid = self.opts.get(CONF_TARGET_TIME_ENTITY)
+        st = self.hass.states.get(eid) if eid else None
+        if st is None:
+            return None
+        raw = st.attributes.get("raw_value") or st.state
+        if raw in BAD:
+            return None
+        t = dt_util.parse_time(str(raw))
+        if t is None:
+            return None
+        local = dt_util.as_local(now)
+        ready = local.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if ready <= local:
+            ready += timedelta(days=1)
+        return ready
+
+    async def _calendar_window(self, eid: str | None, now: datetime) -> tuple[datetime, datetime] | None:
+        if not eid or self.hass.states.get(eid) is None:
+            return None
+        try:
+            resp = await self.hass.services.async_call(
+                "calendar",
+                "get_events",
+                {"entity_id": eid, "start_date_time": now - timedelta(hours=12), "end_date_time": now + timedelta(hours=36)},
+                blocking=True,
+                return_response=True,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.debug("calendar %s: %s", eid, err)
+            return None
+        evs = ((resp or {}).get(eid) or {}).get("events") or []
+        wins = []
+        for ev in evs:
+            s, e = _as_dt(ev.get("start")), _as_dt(ev.get("end"))
+            if s and e and e > now:
+                wins.append((s, e))
+        return min(wins) if wins else None
+
+    async def _load_profile(self, now: datetime) -> list[float]:
+        flat = float(self.opts[CONF_LOAD_KW])
+        ids = self.opts.get(CONF_LOAD_ENTITIES) or []
+        if not ids:
+            self._load_source = "flat"
+            return [flat] * 24
+        if self._load is not None and self._load_at and now - self._load_at < LOAD_PROFILE_REFRESH:
+            return self._load
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import statistics_during_period
+
+            days = int(self.opts[CONF_LOAD_DAYS])
+            start = now - timedelta(days=days)
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period, self.hass, start, now, set(ids), "hour", {"power": "kW"}, {"mean"}
+            )
+        except Exception as err:  # noqa: BLE001 - recorder missing or query failed
+            _LOGGER.warning("Load profile from statistics failed, using flat %.2f kW: %s", flat, err)
+            self._load_source = "flat"
+            return [flat] * 24
+        total = [0.0] * 24
+        have = [False] * 24
+        for eid in ids:
+            sums, counts = [0.0] * 24, [0] * 24
+            for row in stats.get(eid, []):
+                m = row.get("mean")
+                st = row.get("start")
+                if m is None or st is None:
+                    continue
+                ts = st if isinstance(st, datetime) else datetime.fromtimestamp(float(st), timezone.utc)
+                h = dt_util.as_local(ts).hour
+                sums[h] += max(0.0, float(m))
+                counts[h] += 1
+            for h in range(24):
+                if counts[h]:
+                    total[h] += sums[h] / counts[h]
+                    have[h] = True
+        prof = [round(total[h], 3) if have[h] else flat for h in range(24)]
+        self._load, self._load_at = prof, now
+        self._load_source = "statistics" if any(have) else "flat"
+        return prof
+
+    # ---------- update ----------
+    async def _async_update_data(self) -> dict[str, Any]:
+        self.opts = {**DEFAULTS, **self.config_entry.options}
+        now = dt_util.utcnow()
+        st = self.hass.states.get(self.opts[CONF_SOC_ENTITY])
+        soc = _float(st.state) if st else None
+        if soc is None:
+            raise UpdateFailed(f"Battery SOC {self.opts[CONF_SOC_ENTITY]} is unavailable")
+        cfg = self.planner_config()
+        imp = self.rates(self.opts.get(CONF_IMPORT_RATES, []))
+        exp = self.rates(self.opts.get(CONF_EXPORT_RATES, []))
+        disp = self.dispatches()
+        inp = P.PlannerInputs(
+            now=now,
+            tz=dt_util.get_default_time_zone(),
+            soc=soc,
+            load_kw=await self._load_profile(now),
+            export_rates=exp,
+            import_rates=imp,
+            dispatches=disp,
+            saving_session=await self._calendar_window(self.opts.get(CONF_SAVING_CALENDAR), now),
+            free_session=await self._calendar_window(self.opts.get(CONF_FREE_CALENDAR), now),
+        )
+        result = await self.hass.async_add_executor_job(P.plan, cfg, inp)
+        result["load_profile_kw"] = inp.load_kw
+        result["load_source"] = self._load_source
+        result["standing_charge"] = self.standing_charge()
+        result["soc_entity"] = self.opts[CONF_SOC_ENTITY]
+
+        ready = self.ready_time(now)
+        if ready is not None:
+            r_utc = ready.astimezone(timezone.utc)
+            result["ready_time"] = ready.isoformat()
+            result["dispatch_hours_before_ready"] = round(P.hours_before(disp, r_utc), 2)
+            result["final_slot_scheduled"] = P.covers(disp, r_utc - timedelta(minutes=30), r_utc)
+        self.costs.set_rates(imp, exp)
+        return result
+
+    def standing_charge(self) -> float | None:
+        eid = self.opts.get(CONF_STANDING_CHARGE)
+        st = self.hass.states.get(eid) if eid else None
+        return _float(st.state) if st else None
+
+
+class CostTracker:
+    """Integrates grid power x live rates into today's / yesterday's cost."""
+
+    STORE_VERSION = 1
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: BatteryPlanCoordinator) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.coordinator = coordinator
+        self.store: Store[dict[str, Any]] = Store(hass, self.STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.costs")
+        self.today: dict[str, Any] = self._blank(dt_util.now().date().isoformat())
+        self.yesterday: dict[str, Any] | None = None
+        self._imp: list[P.Rate] = []
+        self._exp: list[P.Rate] = []
+        self._last_t: datetime | None = None
+        self._last_kw: float | None = None
+        self._listeners: list = []
+        self._entity_cbs: list = []
+
+    @staticmethod
+    def _blank(day: str) -> dict[str, Any]:
+        return {"date": day, "import_kwh": 0.0, "import_cost": 0.0, "export_kwh": 0.0, "export_value": 0.0, "unpriced_kwh": 0.0}
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.coordinator.opts.get(CONF_GRID_POWER_ENTITY))
+
+    def set_rates(self, imp: list[P.Rate], exp: list[P.Rate]) -> None:
+        if imp:
+            self._imp = imp
+        if exp:
+            self._exp = exp
+
+    def add_listener(self, cb) -> None:
+        self._entity_cbs.append(cb)
+
+    def _notify(self) -> None:
+        for cb in self._entity_cbs:
+            cb()
+
+    async def async_start(self) -> None:
+        data = await self.store.async_load() or {}
+        if data.get("today"):
+            self.today = data["today"]
+        self.yesterday = data.get("yesterday")
+        self._rollover(dt_util.now())
+        eid = self.coordinator.opts.get(CONF_GRID_POWER_ENTITY)
+        if not eid:
+            return
+        self._listeners.append(async_track_state_change_event(self.hass, [eid], self._on_power))
+        self._listeners.append(async_track_time_interval(self.hass, self._on_tick, timedelta(minutes=1)))
+        st = self.hass.states.get(eid)
+        self._last_kw = self._kw(st.state, st.attributes) if st else None
+        self._last_t = dt_util.utcnow()
+
+    async def async_stop(self) -> None:
+        for unsub in self._listeners:
+            unsub()
+        self._listeners.clear()
+        self._accumulate(dt_util.utcnow())
+        await self.store.async_save(self._data())
+
+    def _data(self) -> dict[str, Any]:
+        return {"today": self.today, "yesterday": self.yesterday}
+
+    def _kw(self, state: str, attrs: dict) -> float | None:
+        v = _float(state)
+        if v is None:
+            return None
+        unit = (attrs.get("unit_of_measurement") or "W").lower()
+        kw = v / 1000 if unit == "w" else v * 1000 if unit == "mw" else v
+        return -kw if self.coordinator.opts.get(CONF_GRID_POWER_INVERT) else kw
+
+    @staticmethod
+    def _price(rates: list[P.Rate], t: datetime) -> float | None:
+        for r in rates:
+            if r.start <= t < r.end:
+                return r.price
+        return None
+
+    def _rollover(self, now_local: datetime) -> None:
+        day = now_local.date().isoformat()
+        if self.today["date"] != day:
+            yday = (now_local.date() - timedelta(days=1)).isoformat()
+            self.yesterday = self.today if self.today["date"] == yday else None
+            self.today = self._blank(day)
+
+    def _accumulate(self, now: datetime) -> None:
+        if self._last_t is None or self._last_kw is None:
+            self._last_t = now
+            return
+        t = self._last_t
+        kw = self._last_kw
+        while t < now:
+            # split at half-hour boundaries (rate changes) and local midnight
+            nxt = datetime.fromtimestamp((t.timestamp() // 1800 + 1) * 1800, timezone.utc)
+            seg_end = min(nxt, now)
+            local = dt_util.as_local(t)
+            self._rollover(local)
+            h = (seg_end - t).total_seconds() / 3600
+            if kw > 0:
+                e = kw * h
+                p = self._price(self._imp, t)
+                self.today["import_kwh"] += e
+                if p is None:
+                    self.today["unpriced_kwh"] += e
+                else:
+                    self.today["import_cost"] += e * p
+            elif kw < 0:
+                e = -kw * h
+                p = self._price(self._exp, t)
+                self.today["export_kwh"] += e
+                if p is None:
+                    self.today["unpriced_kwh"] += e
+                else:
+                    self.today["export_value"] += e * p
+            t = seg_end
+        self._last_t = now
+
+    @callback
+    def _on_power(self, event: Event[EventStateChangedData]) -> None:
+        now = dt_util.utcnow()
+        self._accumulate(now)
+        st = event.data["new_state"]
+        self._last_kw = self._kw(st.state, st.attributes) if st else None
+        self.store.async_delay_save(self._data, 120)
+
+    @callback
+    def _on_tick(self, now: datetime) -> None:
+        self._accumulate(dt_util.utcnow())
+        self.store.async_delay_save(self._data, 120)
+        self._notify()
+
+    def net(self, d: dict[str, Any] | None) -> float | None:
+        if not d:
+            return None
+        sc = self.coordinator.standing_charge() or 0.0
+        return d["export_value"] - d["import_cost"] - sc
+
