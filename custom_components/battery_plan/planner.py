@@ -38,7 +38,10 @@ class PlannerConfig:
 
     capacity_kwh: float
     target_soc: float = 100.0
-    reserve_soc: float = 20.0
+    reserve_soc: float = 20.0  # export floor (at night / at the charge window)
+    day_reserve_soc: float | None = None  # optional higher floor during the day
+    day_reserve_start: int = 5 * 3600 + 25 * 60  # seconds after local midnight
+    day_reserve_end: int = 22 * 3600 + 25 * 60
     min_soc: float = 5.0
     charge_start: int = 23 * 3600 + 1800  # seconds after local midnight
     charge_duration: int = 6 * 3600  # seconds
@@ -53,6 +56,7 @@ class PlannerConfig:
     max_export_kw: float = 5.0
     saving_export_kw: float | None = None
     min_export_price: float = 12.5  # p/kWh
+    min_export_price_pre_free: float | None = None  # p/kWh, before a free-electricity session
     discharge_eff: float = 0.9
     charge_eff: float = 0.93
     dispatch_charges_battery: bool = True
@@ -97,6 +101,7 @@ class _Slot:
     iog_h: float
     finish_by: datetime | None
     load_kw: float
+    floor: float  # export floor SOC % for this slot
     export_p: float | None  # p/kWh
     import_gbp: float | None  # GBP/kWh
 
@@ -119,6 +124,17 @@ def _r(v: float, dp: int) -> float:
 
 def _iso(t: datetime) -> str:
     return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def floor_at(cfg: PlannerConfig, t: datetime, tz: tzinfo) -> float:
+    """Export floor (SOC %) at time ``t``: the day floor inside its window, else the night floor."""
+    if cfg.day_reserve_soc is None:
+        return cfg.reserve_soc
+    local = t.astimezone(tz)
+    sod = local.hour * 3600 + local.minute * 60 + local.second
+    a, b = cfg.day_reserve_start, cfg.day_reserve_end
+    inside = a <= sod < b if a <= b else (sod >= a or sod < b)
+    return cfg.day_reserve_soc if inside else cfg.reserve_soc
 
 
 def charge_finish_by(cfg: PlannerConfig, t: datetime, tz: tzinfo) -> datetime | None:
@@ -193,6 +209,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 iog_h=iog_h,
                 finish_by=finish_by,
                 load_kw=float(inp.load_kw[local.hour * 2 + (local.minute >= 30)] if len(inp.load_kw) == 48 else inp.load_kw[local.hour]),
+                floor=floor_at(cfg, frm, inp.tz),
                 export_p=None if exp_gbp is None else exp_gbp * 100,
                 import_gbp=_rate_at(inp.import_rates, s),
             )
@@ -203,7 +220,6 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
 def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: list[float]) -> list[dict]:
     cap = cfg.capacity_kwh
     kwh = inp.soc / 100 * cap
-    res_kwh = cfg.reserve_soc / 100 * cap
     min_kwh = min(cfg.min_soc, cfg.reserve_soc) / 100 * cap
     tgt = cfg.target_soc / 100 * cap
     eff = cfg.discharge_eff
@@ -230,7 +246,7 @@ def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: l
             load_b = sl.load_kw / eff
             want = exp[i]
             if want > 0:
-                room = max(0.0, (kwh - res_kwh) / sl.hours)
+                room = max(0.0, (kwh - sl.floor / 100 * cap) / sl.hours)
                 exp_b = min(want / eff, max(0.0, room - load_b))
                 exp_kw = exp_b * eff
                 batt = -(load_b + exp_b)
@@ -265,26 +281,41 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
         if r == 0:
             seg = 1
             continue
-        rows = _simulate(cfg, inp, slots, exp)
-        res_soc = cfg.reserve_soc
+        res_soc = floor_at(cfg, slots[r].frm, inp.tz)
+        min_price = cfg.min_export_price
         if slots[r].free and inp.free_session:
             free_h = (inp.free_session[1] - inp.free_session[0]).total_seconds() / 3600
-            res_soc = max(cfg.reserve_soc, 100 - free_h * cfg.max_charge_kw / cap * 100)
-        surplus = rows[r - 1]["kwh"] - res_soc / 100 * cap
+            res_soc = max(res_soc, 100 - free_h * cfg.max_charge_kw / cap * 100)
+            if cfg.min_export_price_pre_free is not None:
+                min_price = cfg.min_export_price_pre_free
         cands = [
             j
             for j in range(seg, r)
             if not (slots[j].charge or slots[j].saving or slots[j].iog_h > 0)
             and slots[j].export_p is not None
-            and slots[j].export_p >= cfg.min_export_price
+            and slots[j].export_p >= min_price
         ]
         cands.sort(key=lambda j: -slots[j].export_p)  # stable, like JS sort
-        for j in cands:
+        # With a day floor some best-priced slots can't use all they're given, so
+        # re-check and hand what's left to the next slots (single pass otherwise).
+        start_kwh = inp.soc / 100 * cap
+        for _pass in range(4 if cfg.day_reserve_soc is not None else 1):
+            rows = _simulate(cfg, inp, slots, exp)
+            surplus = rows[r - 1]["kwh"] - res_soc / 100 * cap
             if surplus <= 0.05:
                 break
-            kw = min(cfg.max_export_kw, surplus * eff / slots[j].hours)
-            exp[j] = kw
-            surplus -= kw * slots[j].hours / eff
+            for j in cands:
+                if surplus <= 0.05:
+                    break
+                if exp[j] > 0:
+                    continue
+                if cfg.day_reserve_soc is not None:
+                    before = rows[j - 1]["kwh"] if j > 0 else start_kwh
+                    if before - slots[j].floor / 100 * cap <= 0.05:
+                        continue  # already at this slot's floor
+                kw = min(cfg.max_export_kw, surplus * eff / slots[j].hours)
+                exp[j] = kw
+                surplus -= kw * slots[j].hours / eff
         seg = r
         while seg < n and slots[seg].charge:
             seg += 1
@@ -307,6 +338,8 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
                 "mode": row["mode"],
                 "rate": None if sl.export_p is None else _r(sl.export_p, 2),
                 "ip": None if sl.import_gbp is None else _r(sl.import_gbp * 100, 2),
+                "ld": _r(sl.load_kw, 2),
+                "fl": sl.floor,
             }
         )
         d = days.setdefault(
@@ -358,7 +391,9 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
         "soc_now": inp.soc,
         "soc_at_next_charge": soc_at_charge,
         "min_soc_ahead": min(f["soc"] for f in forecast),
-        "reserve_soc": cfg.reserve_soc,
+        "reserve_soc": floor_at(cfg, inp.now, inp.tz),
+        "night_reserve_soc": cfg.reserve_soc,
+        "day_reserve_soc": cfg.day_reserve_soc,
         "capacity_kwh": _r(cap, 1),
         "charge_kw": _r(cfg.max_charge_kw, 2),
         "max_export_kw": cfg.max_export_kw,
@@ -413,6 +448,7 @@ __all__ = [
     "PlannerConfig",
     "PlannerInputs",
     "charge_finish_by",
+    "floor_at",
     "spread_charge_kw",
     "Rate",
     "plan",

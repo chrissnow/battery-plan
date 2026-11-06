@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -25,6 +25,9 @@ CONF_CAPACITY_KWH = "capacity_kwh"
 CONF_TARGET_SOC = "target_soc"
 CONF_RESERVE_SOC = "reserve_soc"
 CONF_MIN_SOC = "min_soc"
+CONF_DAY_RESERVE_SOC = "day_reserve_soc"
+CONF_DAY_RESERVE_START = "day_reserve_start"
+CONF_DAY_RESERVE_END = "day_reserve_end"
 
 # Tariff (Octopus Energy integration rate event entities)
 CONF_IMPORT_RATES = "import_rates"
@@ -48,6 +51,9 @@ CONF_CHARGE_EFF = "charge_eff"
 CONF_MAX_EXPORT_KW = "max_export_kw"
 CONF_SAVING_EXPORT_KW = "saving_export_kw"
 CONF_MIN_EXPORT_PRICE = "min_export_price"
+CONF_MIN_EXPORT_PRICE_PRE_FREE = "min_export_price_pre_free"
+CONF_LIMITED_EXPORT_KW = "limited_export_kw"
+CONF_EXPORT_TRACKING = "export_tracking"
 CONF_DISCHARGE_EFF = "discharge_eff"
 
 # Load
@@ -72,6 +78,10 @@ CONF_SETPOINT_DEADBAND_W = "setpoint_deadband_w"
 CONF_BATTERY_VOLTAGE = "battery_voltage"
 CONF_STALE_MIN = "stale_minutes"
 CONF_HEARTBEAT_TOPIC = "heartbeat_topic"
+CONF_EV_ALLOW_ENTITY = "ev_allow_entity"
+CONF_EV_ALLOW_INVERT = "ev_allow_invert"
+EV_INHIBIT_W = -200
+OVERRIDES = ["auto", "hold", "max_export", "limited_export", "saving", "zero", "custom"]
 CONTROL_INTERVAL = timedelta(seconds=30)
 
 # Actuals
@@ -88,6 +98,11 @@ WEEKDAYS = ["none", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DEFAULTS: dict = {
     CONF_TARGET_SOC: 100,
     CONF_RESERVE_SOC: 20,
+    CONF_DAY_RESERVE_START: "05:25:00",
+    CONF_DAY_RESERVE_END: "22:25:00",
+    CONF_LIMITED_EXPORT_KW: 4.0,
+    CONF_EXPORT_TRACKING: True,
+    CONF_EV_ALLOW_INVERT: False,
     CONF_MIN_SOC: 5,
     CONF_CHARGE_START: "23:30:00",
     CONF_CHARGE_HOURS: 6,
@@ -116,7 +131,16 @@ DEFAULTS: dict = {
 }
 
 SECTIONS: dict[str, list[str]] = {
-    SEC_BATTERY: [CONF_SOC_ENTITY, CONF_CAPACITY_KWH, CONF_TARGET_SOC, CONF_RESERVE_SOC, CONF_MIN_SOC],
+    SEC_BATTERY: [
+        CONF_SOC_ENTITY,
+        CONF_CAPACITY_KWH,
+        CONF_TARGET_SOC,
+        CONF_RESERVE_SOC,
+        CONF_DAY_RESERVE_SOC,
+        CONF_DAY_RESERVE_START,
+        CONF_DAY_RESERVE_END,
+        CONF_MIN_SOC,
+    ],
     SEC_TARIFF: [CONF_IMPORT_RATES, CONF_EXPORT_RATES, CONF_STANDING_CHARGE],
     SEC_CHARGING: [
         CONF_CHARGE_START,
@@ -131,7 +155,15 @@ SECTIONS: dict[str, list[str]] = {
         CONF_LONG_BALANCE_MIN,
         CONF_CHARGE_EFF,
     ],
-    SEC_EXPORT: [CONF_MAX_EXPORT_KW, CONF_SAVING_EXPORT_KW, CONF_MIN_EXPORT_PRICE, CONF_DISCHARGE_EFF],
+    SEC_EXPORT: [
+        CONF_MAX_EXPORT_KW,
+        CONF_SAVING_EXPORT_KW,
+        CONF_LIMITED_EXPORT_KW,
+        CONF_MIN_EXPORT_PRICE,
+        CONF_MIN_EXPORT_PRICE_PRE_FREE,
+        CONF_EXPORT_TRACKING,
+        CONF_DISCHARGE_EFF,
+    ],
     SEC_LOAD: [CONF_LOAD_ENTITIES, CONF_LOAD_EXCLUDE, CONF_LOAD_DAYS, CONF_LOAD_KW],
     SEC_OCTOPUS: [
         CONF_DISPATCHING_ENTITY,
@@ -150,5 +182,7 @@ SECTIONS: dict[str, list[str]] = {
         CONF_BATTERY_VOLTAGE,
         CONF_STALE_MIN,
         CONF_HEARTBEAT_TOPIC,
+        CONF_EV_ALLOW_ENTITY,
+        CONF_EV_ALLOW_INVERT,
     ],
 }

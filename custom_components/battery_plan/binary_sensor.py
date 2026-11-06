@@ -16,8 +16,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: BatteryPlanConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
 ) -> None:
     c = entry.runtime_data
+    ents: list[BinarySensorEntity] = [EvInhibitSensor(c, entry)]
     if c.opts.get(CONF_DISPATCHING_ENTITY) and c.opts.get(CONF_TARGET_TIME_ENTITY):
-        async_add_entities([FinalSlotSensor(c, entry)])
+        ents.append(FinalSlotSensor(c, entry))
+    async_add_entities(ents)
 
 
 class FinalSlotSensor(CoordinatorEntity[BatteryPlanCoordinator], BinarySensorEntity):
@@ -42,3 +44,23 @@ class FinalSlotSensor(CoordinatorEntity[BatteryPlanCoordinator], BinarySensorEnt
     @property
     def extra_state_attributes(self) -> dict:
         return {"ready_time": self.coordinator.data.get("ready_time")}
+
+
+class EvInhibitSensor(BinarySensorEntity):
+    """On while exporting (>= 200 W) outside the charge window: pause the EV charger."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "ev_inhibit"
+    _attr_should_poll = False
+
+    def __init__(self, c: BatteryPlanCoordinator, entry: BatteryPlanConfigEntry) -> None:
+        self._ctl = c.controller
+        self._attr_unique_id = f"{entry.entry_id}_ev_inhibit"
+        self._attr_device_info = device_info(entry)
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._ctl.add_listener(self.async_write_ha_state))
+
+    @property
+    def is_on(self) -> bool:
+        return self._ctl.ev_inhibit

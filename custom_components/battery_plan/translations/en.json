@@ -18,15 +18,21 @@
               "soc_entity": "Battery SOC sensor",
               "capacity_kwh": "Usable capacity",
               "target_soc": "Charge target",
-              "reserve_soc": "Export floor",
-              "min_soc": "Minimum SOC"
+              "reserve_soc": "Export floor (night)",
+              "min_soc": "Minimum SOC",
+              "day_reserve_soc": "Export floor (day)",
+              "day_reserve_start": "Day floor from",
+              "day_reserve_end": "Day floor until"
             },
             "data_description": {
               "soc_entity": "Battery state of charge (%).",
               "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
               "target_soc": "SOC the overnight charge aims for.",
-              "reserve_soc": "Planned exports stop at this SOC so the house can run until the next charge.",
-              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid."
+              "reserve_soc": "Planned exports stop at this SOC; used outside the day window and at the start of the charge window.",
+              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid.",
+              "day_reserve_soc": "Optional: a higher floor during the day (e.g. 25%), so daytime exports stop earlier.",
+              "day_reserve_start": "When the day floor starts.",
+              "day_reserve_end": "When the night floor takes over again."
             }
           },
           "tariff": {
@@ -75,13 +81,19 @@
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
               "min_export_price": "Minimum export price",
-              "discharge_eff": "Discharge efficiency"
+              "discharge_eff": "Discharge efficiency",
+              "limited_export_kw": "Limited export power",
+              "min_export_price_pre_free": "Minimum export price before a free session",
+              "export_tracking": "Track SOC when exporting"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
               "min_export_price": "Only export in slots paying at least this.",
-              "discharge_eff": "Battery to AC."
+              "discharge_eff": "Battery to AC.",
+              "limited_export_kw": "Used by the \"limited export\" override.",
+              "min_export_price_pre_free": "Optional: lower price accepted when emptying the battery ahead of a free-electricity session.",
+              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
             }
           },
           "load": {
@@ -141,7 +153,9 @@
               "setpoint_deadband_w": "Setpoint deadband",
               "battery_voltage": "Battery voltage",
               "stale_minutes": "Stale plan timeout",
-              "heartbeat_topic": "MQTT heartbeat topic"
+              "heartbeat_topic": "MQTT heartbeat topic",
+              "ev_allow_entity": "EV charger allow switch",
+              "ev_allow_invert": "Invert EV switch"
             },
             "data_description": {
               "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
@@ -151,7 +165,9 @@
               "setpoint_deadband_w": "Changes smaller than this are not written.",
               "battery_voltage": "Nominal voltage to convert charge power to current.",
               "stale_minutes": "If the plan is older than this, control falls back to the idle setpoint.",
-              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED)."
+              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED).",
+              "ev_allow_entity": "Optional: switch turned off while exporting outside the charge window and on otherwise (e.g. a GX relay wired to a Zappi eSense input). Only written while Control is on.",
+              "ev_allow_invert": "Turn on if the switch must be ON to pause charging."
             }
           }
         }
@@ -174,15 +190,21 @@
               "soc_entity": "Battery SOC sensor",
               "capacity_kwh": "Usable capacity",
               "target_soc": "Charge target",
-              "reserve_soc": "Export floor",
-              "min_soc": "Minimum SOC"
+              "reserve_soc": "Export floor (night)",
+              "min_soc": "Minimum SOC",
+              "day_reserve_soc": "Export floor (day)",
+              "day_reserve_start": "Day floor from",
+              "day_reserve_end": "Day floor until"
             },
             "data_description": {
               "soc_entity": "Battery state of charge (%).",
               "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
               "target_soc": "SOC the overnight charge aims for.",
-              "reserve_soc": "Planned exports stop at this SOC so the house can run until the next charge.",
-              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid."
+              "reserve_soc": "Planned exports stop at this SOC; used outside the day window and at the start of the charge window.",
+              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid.",
+              "day_reserve_soc": "Optional: a higher floor during the day (e.g. 25%), so daytime exports stop earlier.",
+              "day_reserve_start": "When the day floor starts.",
+              "day_reserve_end": "When the night floor takes over again."
             }
           },
           "tariff": {
@@ -231,13 +253,19 @@
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
               "min_export_price": "Minimum export price",
-              "discharge_eff": "Discharge efficiency"
+              "discharge_eff": "Discharge efficiency",
+              "limited_export_kw": "Limited export power",
+              "min_export_price_pre_free": "Minimum export price before a free session",
+              "export_tracking": "Track SOC when exporting"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
               "min_export_price": "Only export in slots paying at least this.",
-              "discharge_eff": "Battery to AC."
+              "discharge_eff": "Battery to AC.",
+              "limited_export_kw": "Used by the \"limited export\" override.",
+              "min_export_price_pre_free": "Optional: lower price accepted when emptying the battery ahead of a free-electricity session.",
+              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
             }
           },
           "load": {
@@ -297,7 +325,9 @@
               "setpoint_deadband_w": "Setpoint deadband",
               "battery_voltage": "Battery voltage",
               "stale_minutes": "Stale plan timeout",
-              "heartbeat_topic": "MQTT heartbeat topic"
+              "heartbeat_topic": "MQTT heartbeat topic",
+              "ev_allow_entity": "EV charger allow switch",
+              "ev_allow_invert": "Invert EV switch"
             },
             "data_description": {
               "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
@@ -307,7 +337,9 @@
               "setpoint_deadband_w": "Changes smaller than this are not written.",
               "battery_voltage": "Nominal voltage to convert charge power to current.",
               "stale_minutes": "If the plan is older than this, control falls back to the idle setpoint.",
-              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED)."
+              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED).",
+              "ev_allow_entity": "Optional: switch turned off while exporting outside the charge window and on otherwise (e.g. a GX relay wired to a Zappi eSense input). Only written while Control is on.",
+              "ev_allow_invert": "Turn on if the switch must be ON to pause charging."
             }
           }
         }
@@ -413,11 +445,33 @@
     "binary_sensor": {
       "final_slot_scheduled": {
         "name": "Final slot scheduled"
+      },
+      "ev_inhibit": {
+        "name": "EV inhibit"
       }
     },
     "switch": {
       "control": {
         "name": "Control"
+      }
+    },
+    "select": {
+      "override": {
+        "name": "Override",
+        "state": {
+          "auto": "Auto (follow plan)",
+          "hold": "Hold (idle setpoint)",
+          "max_export": "Max export",
+          "limited_export": "Limited export",
+          "saving": "Saving-session export",
+          "zero": "Zero grid",
+          "custom": "Custom setpoint"
+        }
+      }
+    },
+    "number": {
+      "custom_setpoint": {
+        "name": "Custom setpoint"
       }
     }
   }

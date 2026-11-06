@@ -13,7 +13,7 @@ Every 5 minutes, and whenever rates or Intelligent Octopus dispatches change, it
 - **Overnight charge window**: charges to your target, at full power or spread so it finishes shortly before the window ends (like a DVCC charge-current spreader). The house runs from grid during the window.
 - **Intelligent Octopus Go dispatches**: planned dispatches outside the window are treated as full-rate top-ups (optional).
 - **Octoplus**: saving sessions export at a higher power; free-electricity sessions charge at full power, and the battery is run down beforehand to make room.
-- **Exports**: before each charge window it keeps enough for the house load plus an export floor, then exports the rest in the best-priced half hours paying at least your minimum price.
+- **Exports**: before each charge window it keeps enough for the house load plus an export floor, then exports the rest in the best-priced half hours paying at least your minimum price. The floor can be higher during the day (e.g. 25% from 05:25 to 22:25, 20% overnight), and the minimum price can be lower before a free-electricity session so the battery empties to make room.
 - **House load**: learned as a half-hourly profile from your power sensors' statistics (last N days), minus any excluded sensors such as an EV charger, or a flat figure.
 - **Costs**: planned import cost and export earnings per day, from your import and export rates, and optionally the actual cost from a grid power sensor.
 
@@ -40,14 +40,14 @@ entity: sensor.battery_plan_soc_at_next_charge
 
 | Section | Setting | Notes |
 |:--|:--|:--|
-| Battery | SOC sensor, usable capacity, charge target, export floor, minimum SOC | Exports stop at the floor; the battery stops discharging at the minimum |
+| Battery | SOC sensor, usable capacity, charge target, export floor, optional daytime floor with start/end times, minimum SOC | Exports stop at the floor in force at the time; the battery stops discharging at the minimum |
 | Tariff | Import rate events, export rate events, standing charge sensor | Pick the Octopus Energy `…_current_day_rates` **and** `…_next_day_rates` events for each meter |
 | Overnight charging | Window start and length, full power or spread, max/min/make-up power, finish-early minutes, an optional "long balance" night, charge efficiency | |
-| Export | Max export power, saving-session power, minimum export price (p/kWh), discharge efficiency | |
+| Export | Max export power, saving-session power, limited-export power, minimum export price, minimum price before a free session (p/kWh), SOC tracking, discharge efficiency | |
 | House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback | Uses 5-minute statistics where the recorder still has them, hourly otherwise |
 | Intelligent Octopus & Octoplus | Dispatching sensor, whether dispatches charge the battery, ready-time entity, saving-session and free-electricity calendars | All optional |
 | Actual costs | Grid power sensor (import positive), battery power sensor (charging positive), invert switches | Optional; enables actual cost sensors and a more accurate Battery action sensor |
-| Control (optional) | Grid setpoint entity, charge current entity, idle and charging setpoints, deadband, battery voltage, stale timeout, MQTT heartbeat topic | Nothing is written until the Control switch is on |
+| Control (optional) | Grid setpoint entity, charge current entity, idle and charging setpoints, deadband, battery voltage, stale timeout, MQTT heartbeat topic, EV charger allow switch (+ invert) | Nothing is written until the Control switch is on |
 
 Everything can be changed later under **Configure**.
 
@@ -71,12 +71,16 @@ Entity IDs below assume the default name "Battery Plan".
 | `sensor.battery_plan_target_charge_current` | Charge current limit the controller wants now (A) |
 | `sensor.battery_plan_control_status` | `disabled` (dry run), `active` or `fallback`, with a `reason` attribute |
 | `switch.battery_plan_control` | Turns control on. Off by default; created only when a setpoint or current entity is set |
+| `select.battery_plan_override` | `auto` (follow the plan), `hold`, `max_export`, `limited_export`, `saving`, `zero` or `custom`. Export overrides still stop at the floor |
+| `number.battery_plan_custom_setpoint` | Grid setpoint (W) used by the `custom` override |
+| `binary_sensor.battery_plan_ev_inhibit` | On while exporting 200 W or more outside the charge window, so an EV charger doesn't drain the battery |
 
 ## Control (optional)
 
 Every 30 seconds, and whenever the plan changes, the integration works out:
 
-- **Grid setpoint**: minus the planned export power in export and saving-session slots; the *charging setpoint* in charge, hold and IOG slots; otherwise the *idle setpoint*.
+- **Grid setpoint**: in export slots, with SOC tracking on, the power that brings the battery to the plan's SOC at the end of the slot, after the live house load (so a big load shrinks the export instead of overshooting); otherwise the planned export power. Saving sessions export at the saving-session power; charge, hold and IOG slots use the *charging setpoint*; otherwise the *idle setpoint*. The override select replaces this when not `auto`.
+- **EV charger**: if an allow switch is set (e.g. a GX relay wired to a Zappi eSense input), it's turned off while the EV inhibit sensor is on and back on otherwise.
 - **Charge current limit**: the spread rate (energy still needed ÷ time to finish + make-up, converted with the battery voltage) inside the charge window, otherwise the maximum.
 
 These always appear as sensors, so you can compare them with what your current setup does before handing over. Turning on `switch.battery_plan_control` writes them to the number entities you chose (e.g. Victron's ESS AC power setpoint and DVCC max charge current).
@@ -86,7 +90,7 @@ Safeguards:
 - Live SOC at or below the export floor → idle setpoint, whatever the plan says.
 - Export capped at your maximum (or saving-session) export power.
 - Plan stale or unavailable, or SOC unavailable → **fallback**: idle setpoint and maximum charge current.
-- Turning control off, unloading the integration or stopping Home Assistant → idle setpoint and maximum current written once.
+- Turning control off, unloading the integration or stopping Home Assistant → idle setpoint, maximum current and EV charger allowed, written once.
 - Changes within the deadband aren't written.
 - Optional MQTT heartbeat: `on` every 30 s while controlling, `off` when stopped. [`docs/node-red-watchdog.json`](docs/node-red-watchdog.json) is a Node-RED flow for a Victron GX that resets the grid setpoint to −50 W if the heartbeat stops for 2 minutes (for example, if Home Assistant crashes).
 
@@ -105,6 +109,8 @@ Each `forecast` item is one half-hour slot (`t` is the slot's end):
 | `ik`, `ek` | Grid import / export energy in the slot (kWh) |
 | `mode` | `self`, `charge`, `hold`, `iog`, `export`, `saving`, `grid` |
 | `rate`, `ip` | Export and import price (p/kWh) |
+| `ld` | Expected house load (kW) |
+| `fl` | Export floor in force (%) |
 
 Other planners can publish the same attributes to use the card.
 

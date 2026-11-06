@@ -29,11 +29,12 @@ async def setup(hass, freezer, opts, at=NOW):
     hass.states.async_set(SP, "-50", {"min": -15000, "max": 15000})
     hass.states.async_set(CUR, "344", {"min": 0, "max": 344})
     hass.states.async_set("sensor.batt_power", "-1500", {"device_class": "power", "unit_of_measurement": "W"})
-    calls = async_mock_service(hass, "number", "set_value")
     entry = MockConfigEntry(domain=DOMAIN, title="Battery Plan", data={"name": "Battery Plan"}, options=opts)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    # after setup: our number platform registers the real number.set_value
+    calls = async_mock_service(hass, "number", "set_value")
     return entry, calls
 
 
@@ -135,3 +136,4 @@ async def test_battery_action(hass, octopus_states, freezer) -> None:
     hass.states.async_set("sensor.batt_power", "9000", {"device_class": "power", "unit_of_measurement": "W"})
     await hass.async_block_till_done()
     assert val(hass, a) == "charge"
+

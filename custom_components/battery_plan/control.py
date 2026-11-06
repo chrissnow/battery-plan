@@ -1,13 +1,18 @@
 """Turns the plan into live control targets and (optionally) writes them.
 
 Every 30 s, and whenever the plan updates, the controller works out:
-- a grid setpoint (W): export power in export/saving slots, the charge setpoint
-  in charge/hold/IOG slots, otherwise the idle setpoint;
-- a charge current limit (A): the spread rate inside the charge window, else max.
+- a grid setpoint (W): in export slots, the grid export needed to reach the plan's
+  SOC at the end of the slot given the live house load (or the planned export
+  power if tracking is off); in saving-session slots the planned export; the
+  charge setpoint in charge/hold/IOG slots; otherwise the idle setpoint. An
+  override select (hold, max/limited export, saving, zero, custom) replaces the plan;
+- a charge current limit (A): the spread rate inside the charge window, else max;
+- EV inhibit: on while exporting at least 200 W outside the charge window.
 
 These are always published as sensors (dry run). Only when the control switch is
 on are they written to the configured number entities. Safeguards:
-- live SOC at or below the export floor -> idle setpoint, whatever the plan says;
+- live SOC at or below the export floor (day or night value) -> no export, whatever
+  the plan or override says;
 - export capped at the configured maximum;
 - plan stale / unavailable or SOC unavailable -> fallback (idle setpoint, max current);
 - turning control off or unloading -> idle setpoint and max current written once;
@@ -32,15 +37,23 @@ from .const import (
     CONF_BATTERY_VOLTAGE,
     CONF_CHARGE_SETPOINT_W,
     CONF_CURRENT_ENTITY,
+    CONF_EV_ALLOW_ENTITY,
+    CONF_EV_ALLOW_INVERT,
+    CONF_EXPORT_TRACKING,
     CONF_HEARTBEAT_TOPIC,
     CONF_IDLE_SETPOINT_W,
+    CONF_LIMITED_EXPORT_KW,
+    CONF_LOAD_ENTITIES,
+    CONF_LOAD_EXCLUDE,
+    CONF_LOAD_KW,
     CONF_SETPOINT_DEADBAND_W,
     CONF_SETPOINT_ENTITY,
     CONF_SOC_ENTITY,
     CONF_STALE_MIN,
     CONTROL_INTERVAL,
+    EV_INHIBIT_W,
 )
-from .planner import charge_finish_by, spread_charge_kw
+from .planner import charge_finish_by, floor_at, spread_charge_kw
 
 if TYPE_CHECKING:
     from .coordinator import BatteryPlanCoordinator
@@ -73,6 +86,11 @@ class Controller:
         self.reason = "starting"
         self.fallback = False
         self.last_write: datetime | None = None
+        self.override = "auto"
+        self.custom_w = 0.0
+        self.ev_inhibit = False
+        self.floor: float | None = None
+        self._ev_written: bool | None = None
         self._spread: float | None = None
         self._written: dict[str, float] = {}
         self._unsubs: list[Callable[[], None]] = []
@@ -120,6 +138,19 @@ class Controller:
         else:
             await self._revert("control switched off")
         self._notify()
+
+    async def async_set_override(self, mode: str, custom_w: float | None = None) -> None:
+        self.override = mode
+        if custom_w is not None:
+            self.custom_w = custom_w
+        await self.async_run()
+
+    async def async_set_custom(self, watts: float) -> None:
+        self.custom_w = watts
+        if self.override == "custom":
+            await self.async_run()
+        else:
+            self._notify()
 
     # ---------- computing ----------
     @callback
@@ -174,14 +205,48 @@ class Controller:
 
         self.mode = slot["mode"]
         self.fallback = False
-        if self.mode in ("export", "saving"):
-            cap = max(cfg.max_export_kw, cfg.saving_export_kw or 0)
-            if soc <= cfg.reserve_soc:
+        tz = dt_util.get_default_time_zone()
+        self.floor = floor = floor_at(cfg, now, tz)
+        cap = max(cfg.max_export_kw, cfg.saving_export_kw or 0)
+        at_floor = soc <= floor
+
+        def export(kw: float, why: str) -> None:
+            if at_floor:
                 self.setpoint_w = idle
-                self.reason = f"at export floor ({soc:.1f}% <= {cfg.reserve_soc:.0f}%)"
+                self.reason = f"{why}: at export floor ({soc:.1f}% <= {floor:.0f}%)"
+            elif kw < 0.1:
+                self.setpoint_w = idle
+                self.reason = f"{why}: nothing to export"
             else:
-                self.setpoint_w = -round(min(float(slot.get("exp") or 0), cap) * 1000)
-                self.reason = f"{self.mode} {abs(self.setpoint_w) / 1000:.2f} kW"
+                self.setpoint_w = -round(min(kw, cap) * 1000)
+                self.reason = f"{why} {min(kw, cap):.2f} kW"
+
+        ov = self.override
+        if ov == "hold":
+            self.setpoint_w, self.reason = idle, "override: hold"
+        elif ov == "zero":
+            self.setpoint_w, self.reason = 0.0, "override: zero"
+        elif ov == "max_export":
+            export(cfg.max_export_kw, "override: max export")
+        elif ov == "limited_export":
+            export(float(o[CONF_LIMITED_EXPORT_KW]), "override: limited export")
+        elif ov == "saving":
+            export(cfg.saving_export_kw or cfg.max_export_kw, "override: saving export")
+        elif ov == "custom":
+            if self.custom_w < 0:
+                export(-self.custom_w / 1000, "override: custom")
+            else:
+                self.setpoint_w, self.reason = float(self.custom_w), "override: custom"
+        elif self.mode == "export" and o.get(CONF_EXPORT_TRACKING, True):
+            end = dt_util.parse_datetime(slot["t"]) or now
+            hrs = max((end - now).total_seconds() / 3600, 5 / 60)
+            target = max(float(slot["soc"]), floor)
+            batt_kw = (soc - target) / 100 * cfg.capacity_kwh / hrs
+            load = self._live_load_kw(slot)
+            kw = batt_kw * cfg.discharge_eff - load
+            export(kw, f"export to {target:.0f}% by {dt_util.as_local(end):%H:%M}, load {load:.1f} kW:")
+        elif self.mode in ("export", "saving"):
+            export(float(slot.get("exp") or 0), self.mode)
         elif self.mode in ("charge", "hold", "iog"):
             self.setpoint_w = float(o[CONF_CHARGE_SETPOINT_W])
             self.reason = f"{self.mode} slot"
@@ -189,16 +254,65 @@ class Controller:
             self.setpoint_w = idle
             self.reason = "house on battery" if self.mode == "self" else f"{self.mode} slot"
 
+    def _live_load_kw(self, slot: dict) -> float:
+        """House load now: load sensors minus excluded sensors, else the planned load."""
+        o = self.coordinator.opts
+        ids = o.get(CONF_LOAD_ENTITIES) or []
+        planned = float(slot.get("ld") if slot.get("ld") is not None else o[CONF_LOAD_KW])
+        if not ids:
+            return planned
+        total = 0.0
+        for eid in ids:
+            kw = self._kw(eid)
+            if kw is None:
+                return planned
+            total += kw
+        for eid in o.get(CONF_LOAD_EXCLUDE) or []:
+            total -= self._kw(eid) or 0.0
+        return max(0.0, total)
+
+    def _kw(self, eid: str) -> float | None:
+        st = self.hass.states.get(eid)
+        if st is None:
+            return None
+        v = _f(st.state)
+        if v is None:
+            return None
+        unit = (st.attributes.get("unit_of_measurement") or "W").lower()
+        return v / 1000 if unit == "w" else v
+
     # ---------- applying ----------
     async def async_run(self) -> None:
         now = dt_util.utcnow()
         self.compute(now)
+        in_window = charge_finish_by(self.coordinator.planner_config(), now, dt_util.get_default_time_zone()) is not None
+        self.ev_inhibit = (
+            not self.fallback and self.setpoint_w is not None and self.setpoint_w <= EV_INHIBIT_W and not in_window
+        )
         if self.enabled:
             o = self.coordinator.opts
             await self._write(o.get(CONF_SETPOINT_ENTITY), self.setpoint_w, float(o[CONF_SETPOINT_DEADBAND_W]))
             await self._write(o.get(CONF_CURRENT_ENTITY), self.current_a, 1.0)
+            await self._write_ev(not self.ev_inhibit)
             await self._heartbeat("on")
         self._notify()
+
+    async def _write_ev(self, allow: bool, force: bool = False) -> None:
+        o = self.coordinator.opts
+        eid = o.get(CONF_EV_ALLOW_ENTITY)
+        if not eid:
+            return
+        on = allow != bool(o.get(CONF_EV_ALLOW_INVERT))
+        st = self.hass.states.get(eid)
+        if not force and self._ev_written == on and st is not None and st.state == ("on" if on else "off"):
+            return
+        domain = eid.split(".", 1)[0]
+        try:
+            await self.hass.services.async_call(domain, "turn_on" if on else "turn_off", {"entity_id": eid}, blocking=True)
+        except HomeAssistantError as err:
+            _LOGGER.warning("Battery Plan could not switch %s: %s", eid, err)
+            return
+        self._ev_written = on
 
     async def _write(self, eid: str | None, value: float | None, deadband: float, force: bool = False) -> None:
         if not eid or value is None:
@@ -229,6 +343,8 @@ class Controller:
         self._written.clear()
         await self._write(o.get(CONF_SETPOINT_ENTITY), idle, 0, force=True)
         await self._write(o.get(CONF_CURRENT_ENTITY), round(max_a, 1), 0, force=True)
+        await self._write_ev(True, force=True)
+        self._ev_written = None
         await self._heartbeat("off")
         self.reason = why
         _LOGGER.info("Battery Plan control stopped (%s): setpoint %s W, charge current %.0f A", why, idle, max_a)
@@ -246,6 +362,9 @@ class Controller:
         return {
             "mode": self.mode,
             "reason": self.reason,
+            "override": self.override,
+            "export_floor": self.floor,
+            "ev_inhibit": self.ev_inhibit,
             "control_enabled": self.enabled,
             "last_write": self.last_write.isoformat() if self.last_write else None,
         }

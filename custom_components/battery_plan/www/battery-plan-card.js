@@ -142,7 +142,16 @@ class BatteryPlanCard extends HTMLElement {
       grid += `<line x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}" class="g"/><text x="${x(t)}" y="${H - 6}" text-anchor="middle" class="lbl${hh === 0 ? ' b' : ''}">${txt}</text>`;
     }
     const res = a.reserve_soc;
-    const reserve = res != null ? `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">floor ${res}%</text>` : '';
+    let reserve = '';
+    if (pts.length && pts[0].fl != null) {
+      // stepped floor (day/night) along the forecast
+      let d = `M${x(now)},${y(pts[0].fl)}`;
+      pts.forEach((p, i) => { const s = i === 0 ? now : pts[i - 1].t; d += `L${x(s)},${y(p.fl)}L${x(p.t)},${y(p.fl)}`; });
+      const lf = pts[pts.length - 1].fl;
+      reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">floor ${lf}%</text>`;
+    } else if (res != null) {
+      reserve = `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">floor ${res}%</text>`;
+    }
 
     const hist = this._hist.filter(h => h[0] >= t0);
     const socNow = parseFloat(a.soc_now);

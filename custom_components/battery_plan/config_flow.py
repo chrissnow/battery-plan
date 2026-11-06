@@ -50,6 +50,14 @@ from .const import (
     CONF_MIN_CHARGE_KW,
     CONF_MIN_EXPORT_PRICE,
     CONF_MIN_SOC,
+    CONF_DAY_RESERVE_SOC,
+    CONF_DAY_RESERVE_START,
+    CONF_DAY_RESERVE_END,
+    CONF_MIN_EXPORT_PRICE_PRE_FREE,
+    CONF_LIMITED_EXPORT_KW,
+    CONF_EXPORT_TRACKING,
+    CONF_EV_ALLOW_ENTITY,
+    CONF_EV_ALLOW_INVERT,
     CONF_RESERVE_SOC,
     CONF_SAVING_CALENDAR,
     CONF_SAVING_EXPORT_KW,
@@ -92,6 +100,14 @@ FIELDS: dict[str, tuple[Any, bool]] = {
     CONF_TARGET_SOC: (_num(10, 100, 1, "%"), True),
     CONF_RESERVE_SOC: (_num(0, 100, 1, "%"), True),
     CONF_MIN_SOC: (_num(0, 100, 1, "%"), True),
+    CONF_DAY_RESERVE_SOC: (_num(0, 100, 1, "%"), False),
+    CONF_DAY_RESERVE_START: (sel.TimeSelector(), True),
+    CONF_DAY_RESERVE_END: (sel.TimeSelector(), True),
+    CONF_MIN_EXPORT_PRICE_PRE_FREE: (_num(-100, 200, 0.1, "p/kWh"), False),
+    CONF_LIMITED_EXPORT_KW: (_num(0, 100, 0.1, "kW"), True),
+    CONF_EXPORT_TRACKING: (sel.BooleanSelector(), True),
+    CONF_EV_ALLOW_ENTITY: (_ent(["switch", "input_boolean"]), False),
+    CONF_EV_ALLOW_INVERT: (sel.BooleanSelector(), True),
     CONF_IMPORT_RATES: (_ent("event", multiple=True), True),
     CONF_EXPORT_RATES: (_ent("event", multiple=True), False),
     CONF_STANDING_CHARGE: (_ent("sensor"), False),
@@ -177,7 +193,7 @@ def flatten(user_input: dict[str, Any]) -> dict[str, Any]:
 
 def validate(flat: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
-    if flat.get(CONF_RESERVE_SOC, 0) >= flat.get(CONF_TARGET_SOC, 100):
+    if max(flat.get(CONF_RESERVE_SOC, 0), flat.get(CONF_DAY_RESERVE_SOC) or 0) >= flat.get(CONF_TARGET_SOC, 100):
         errors["base"] = "reserve_above_target"
     elif flat.get(CONF_MIN_SOC, 0) > flat.get(CONF_RESERVE_SOC, 0):
         errors["base"] = "min_above_reserve"

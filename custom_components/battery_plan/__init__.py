@@ -15,7 +15,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import CARD_URL, DOMAIN, VERSION
 from .coordinator import BatteryPlanCoordinator
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH, Platform.SELECT, Platform.NUMBER]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type BatteryPlanConfigEntry = ConfigEntry[BatteryPlanCoordinator]
