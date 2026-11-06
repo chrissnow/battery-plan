@@ -34,6 +34,7 @@ from .const import (
     CONF_IMPORT_RATES,
     CONF_LOAD_DAYS,
     CONF_LOAD_ENTITIES,
+    CONF_LOAD_EXCLUDE,
     CONF_LOAD_KW,
     CONF_LONG_BALANCE_DAY,
     CONF_LONG_BALANCE_MIN,
@@ -198,47 +199,73 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 wins.append((s, e))
         return min(wins) if wins else None
 
+    async def _stats(self, ids: set[str], start: datetime, end: datetime, period: str) -> dict:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistics_during_period
+
+        return await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period, self.hass, start, end, ids, period, {"power": "kW"}, {"mean"}
+        )
+
+    @staticmethod
+    def _buckets(rows: list[dict], hourly: bool) -> list[float | None]:
+        """Average kW per local half-hour (48) from statistics rows."""
+        sums, counts = [0.0] * 48, [0] * 48
+        for row in rows:
+            m, st = row.get("mean"), row.get("start")
+            if m is None or st is None:
+                continue
+            ts = st if isinstance(st, datetime) else datetime.fromtimestamp(float(st), timezone.utc)
+            loc = dt_util.as_local(ts)
+            b = loc.hour * 2 + (loc.minute >= 30)
+            for k in ((loc.hour * 2, loc.hour * 2 + 1) if hourly else (b,)):
+                sums[k] += max(0.0, float(m))
+                counts[k] += 1
+        return [sums[i] / counts[i] if counts[i] else None for i in range(48)]
+
     async def _load_profile(self, now: datetime) -> list[float]:
+        """Half-hourly house load (kW): sum of load sensors minus excluded sensors.
+
+        Uses 5-minute statistics where the recorder still has them, hourly
+        long-term statistics otherwise, and the flat figure as a last resort.
+        """
         flat = float(self.opts[CONF_LOAD_KW])
-        ids = self.opts.get(CONF_LOAD_ENTITIES) or []
+        ids = list(self.opts.get(CONF_LOAD_ENTITIES) or [])
+        excl = [e for e in self.opts.get(CONF_LOAD_EXCLUDE) or [] if e not in ids]
         if not ids:
             self._load_source = "flat"
-            return [flat] * 24
+            return [flat] * 48
         if self._load is not None and self._load_at and now - self._load_at < LOAD_PROFILE_REFRESH:
             return self._load
+        start = now - timedelta(days=int(self.opts[CONF_LOAD_DAYS]))
         try:
-            from homeassistant.components.recorder import get_instance
-            from homeassistant.components.recorder.statistics import statistics_during_period
-
-            days = int(self.opts[CONF_LOAD_DAYS])
-            start = now - timedelta(days=days)
-            stats = await get_instance(self.hass).async_add_executor_job(
-                statistics_during_period, self.hass, start, now, set(ids), "hour", {"power": "kW"}, {"mean"}
-            )
+            short = await self._stats(set(ids + excl), start, now, "5minute")
+            long = await self._stats(set(ids + excl), start, now, "hour")
         except Exception as err:  # noqa: BLE001 - recorder missing or query failed
             _LOGGER.warning("Load profile from statistics failed, using flat %.2f kW: %s", flat, err)
             self._load_source = "flat"
-            return [flat] * 24
-        total = [0.0] * 24
-        have = [False] * 24
-        for eid in ids:
-            sums, counts = [0.0] * 24, [0] * 24
-            for row in stats.get(eid, []):
-                m = row.get("mean")
-                st = row.get("start")
-                if m is None or st is None:
-                    continue
-                ts = st if isinstance(st, datetime) else datetime.fromtimestamp(float(st), timezone.utc)
-                h = dt_util.as_local(ts).hour
-                sums[h] += max(0.0, float(m))
-                counts[h] += 1
-            for h in range(24):
-                if counts[h]:
-                    total[h] += sums[h] / counts[h]
-                    have[h] = True
-        prof = [round(total[h], 3) if have[h] else flat for h in range(24)]
+            return [flat] * 48
+
+        def per_entity(eid: str) -> list[float | None]:
+            fine = self._buckets(short.get(eid, []), hourly=False)
+            coarse = self._buckets(long.get(eid, []), hourly=True)
+            return [f if f is not None else c for f, c in zip(fine, coarse)]
+
+        loads = [per_entity(e) for e in ids]
+        subs = [per_entity(e) for e in excl]
+        prof: list[float] = []
+        learned = 0
+        for i in range(48):
+            vals = [v[i] for v in loads if v[i] is not None]
+            if not vals:
+                prof.append(flat)
+                continue
+            learned += 1
+            kw = sum(vals) - sum(v[i] or 0.0 for v in subs)
+            prof.append(round(max(0.0, kw), 3))
         self._load, self._load_at = prof, now
-        self._load_source = "statistics" if any(have) else "flat"
+        fine_any = any(short.get(e) for e in ids)
+        self._load_source = ("statistics_5min" if fine_any else "statistics_hourly") if learned else "flat"
         return prof
 
     # ---------- update ----------

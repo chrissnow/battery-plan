@@ -88,13 +88,15 @@
             "name": "House load",
             "data": {
               "load_entities": "House load power sensors",
+              "load_exclude_entities": "Exclude power sensors",
               "load_days": "Days of history",
               "load_kw": "Flat load"
             },
             "data_description": {
               "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
               "load_days": "Days of statistics used for the load profile.",
-              "load_kw": "Used when no load sensors are set, or for hours with no data."
+              "load_kw": "Used when no load sensors are set, or for hours with no data.",
+              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power."
             }
           },
           "octopus": {
@@ -215,13 +217,15 @@
             "name": "House load",
             "data": {
               "load_entities": "House load power sensors",
+              "load_exclude_entities": "Exclude power sensors",
               "load_days": "Days of history",
               "load_kw": "Flat load"
             },
             "data_description": {
               "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
               "load_days": "Days of statistics used for the load profile.",
-              "load_kw": "Used when no load sensors are set, or for hours with no data."
+              "load_kw": "Used when no load sensors are set, or for hours with no data.",
+              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power."
             }
           },
           "octopus": {

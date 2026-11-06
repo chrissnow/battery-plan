@@ -160,17 +160,21 @@ async def test_load_profile_from_statistics(hass, recorder_mock, octopus_states,
     for i in range(72):
         t = start + timedelta(hours=i)
         rows.append({"start": t, "mean": 400.0 + 100 * t.hour, "min": 0, "max": 0})
-    for eid in ("sensor.load_l1", "sensor.load_l2"):
+    ev = [{"start": r["start"], "mean": 7000.0 if r["start"].hour == 3 else 0.0, "min": 0, "max": 0} for r in rows]
+    for eid, data in (("sensor.load_l1", rows), ("sensor.load_l2", rows), ("sensor.ev", ev)):
         hass.states.async_set(eid, "500", {"device_class": "power", "unit_of_measurement": "W", "state_class": "measurement"})
         meta = {"source": "recorder", "statistic_id": eid, "name": None, "unit_of_measurement": "W",
                 "has_mean": True, "mean_type": StatisticMeanType.ARITHMETIC, "has_sum": False, "unit_class": "power"}
-        async_import_statistics(hass, meta, rows)
+        async_import_statistics(hass, meta, data)
     await async_wait_recording_done(hass)
-    opts = flat(SETTINGS) | {"load_entities": ["sensor.load_l1", "sensor.load_l2"]}
+    opts = flat(SETTINGS) | {"load_entities": ["sensor.load_l1", "sensor.load_l2"], "load_exclude_entities": ["sensor.ev"]}
     await setup(hass, freezer, opts)
     a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
-    assert a["load_source"] == "statistics"
+    assert a["load_source"] == "statistics_hourly"  # no 5-minute data in the test recorder
     prof = a["load_profile_kw"]
-    # two phases, each (400 + 100*h) W -> kW
-    assert prof[0] == pytest.approx(0.8, abs=0.01)
-    assert prof[18] == pytest.approx(2 * 2.2, abs=0.01)
+    assert len(prof) == 48
+    # two phases, each (400 + 100*h) W, per half hour
+    assert prof[0] == prof[1] == pytest.approx(0.8, abs=0.01)
+    assert prof[36] == pytest.approx(2 * 2.2, abs=0.01)
+    # 03:00 hour: 2 x 0.7 kW minus 7 kW EV -> clamped to 0
+    assert prof[6] == 0

@@ -14,7 +14,7 @@ Every 5 minutes, and whenever rates or Intelligent Octopus dispatches change, it
 - **Intelligent Octopus Go dispatches**: planned dispatches outside the window are treated as full-rate top-ups (optional).
 - **Octoplus**: saving sessions export at a higher power; free-electricity sessions charge at full power, and the battery is run down beforehand to make room.
 - **Exports**: before each charge window it keeps enough for the house load plus an export floor, then exports the rest in the best-priced half hours paying at least your minimum price.
-- **House load**: learned as an hourly profile from your power sensors' statistics (last N days), or a flat figure.
+- **House load**: learned as a half-hourly profile from your power sensors' statistics (last N days), minus any excluded sensors such as an EV charger, or a flat figure.
 - **Costs**: planned import cost and export earnings per day, from your import and export rates, and optionally the actual cost from a grid power sensor.
 
 ## Requirements
@@ -44,7 +44,7 @@ entity: sensor.battery_plan_soc_at_next_charge
 | Tariff | Import rate events, export rate events, standing charge sensor | Pick the Octopus Energy `…_current_day_rates` **and** `…_next_day_rates` events for each meter |
 | Overnight charging | Window start and length, full power or spread, max/min/make-up power, finish-early minutes, an optional "long balance" night, charge efficiency | |
 | Export | Max export power, saving-session power, minimum export price (p/kWh), discharge efficiency | |
-| House load | Power sensors (summed, e.g. AC loads per phase), days of history, flat fallback | |
+| House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback | Uses 5-minute statistics where the recorder still has them, hourly otherwise |
 | Intelligent Octopus & Octoplus | Dispatching sensor, whether dispatches charge the battery, ready-time entity, saving-session and free-electricity calendars | All optional |
 | Actual costs | Grid power sensor (import positive), invert switch | Optional; enables actual cost sensors |
 

@@ -75,7 +75,7 @@ class PlannerInputs:
     now: datetime
     tz: tzinfo
     soc: float
-    load_kw: list[float]  # 24 values, by local hour of day
+    load_kw: list[float]  # 24 (per hour) or 48 (per half hour) values, local time
     export_rates: list[Rate] = field(default_factory=list)
     import_rates: list[Rate] = field(default_factory=list)
     dispatches: list[tuple[datetime, datetime]] = field(default_factory=list)
@@ -171,7 +171,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 saving=_overlaps(s, e, saving),
                 iog_h=iog_h,
                 finish_by=finish_by,
-                load_kw=float(inp.load_kw[local.hour]),
+                load_kw=float(inp.load_kw[local.hour * 2 + (local.minute >= 30)] if len(inp.load_kw) == 48 else inp.load_kw[local.hour]),
                 export_p=None if exp_gbp is None else exp_gbp * 100,
                 import_gbp=_rate_at(inp.import_rates, s),
             )
