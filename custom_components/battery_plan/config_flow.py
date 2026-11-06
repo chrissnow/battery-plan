@@ -27,6 +27,16 @@ from .const import (
     CONF_FREE_CALENDAR,
     CONF_GRID_POWER_ENTITY,
     CONF_GRID_POWER_INVERT,
+    CONF_BATTERY_POWER_ENTITY,
+    CONF_BATTERY_POWER_INVERT,
+    CONF_SETPOINT_ENTITY,
+    CONF_CURRENT_ENTITY,
+    CONF_IDLE_SETPOINT_W,
+    CONF_CHARGE_SETPOINT_W,
+    CONF_SETPOINT_DEADBAND_W,
+    CONF_BATTERY_VOLTAGE,
+    CONF_STALE_MIN,
+    CONF_HEARTBEAT_TOPIC,
     CONF_IMPORT_RATES,
     CONF_LOAD_DAYS,
     CONF_LOAD_ENTITIES,
@@ -117,6 +127,16 @@ FIELDS: dict[str, tuple[Any, bool]] = {
     CONF_FREE_CALENDAR: (_ent("calendar"), False),
     CONF_GRID_POWER_ENTITY: (_ent("sensor", device_class="power"), False),
     CONF_GRID_POWER_INVERT: (sel.BooleanSelector(), True),
+    CONF_BATTERY_POWER_ENTITY: (_ent("sensor", device_class="power"), False),
+    CONF_BATTERY_POWER_INVERT: (sel.BooleanSelector(), True),
+    CONF_SETPOINT_ENTITY: (_ent("number"), False),
+    CONF_CURRENT_ENTITY: (_ent("number"), False),
+    CONF_IDLE_SETPOINT_W: (_num(-5000, 5000, 1, "W"), True),
+    CONF_CHARGE_SETPOINT_W: (_num(-5000, 5000, 1, "W"), True),
+    CONF_SETPOINT_DEADBAND_W: (_num(0, 2000, 10, "W"), True),
+    CONF_BATTERY_VOLTAGE: (_num(10, 1000, 0.1, "V"), True),
+    CONF_STALE_MIN: (_num(2, 120, 1, "min"), True),
+    CONF_HEARTBEAT_TOPIC: (sel.TextSelector(), False),
 }
 
 COLLAPSED = {SEC_BATTERY: False, SEC_TARIFF: False}
@@ -137,7 +157,8 @@ def build_schema(values: dict[str, Any], sections: list[str] | None = None) -> v
             else:
                 # suggested_value lets the user clear an optional entity
                 inner[vol.Optional(key, description={"suggested_value": cur})] = selector
-        out[vol.Required(sec_key)] = section(vol.Schema(inner), {"collapsed": COLLAPSED.get(sec_key, True)})
+        key = vol.Required(sec_key) if sec_key in COLLAPSED else vol.Optional(sec_key, default={})
+        out[key] = section(vol.Schema(inner), {"collapsed": COLLAPSED.get(sec_key, True)})
     return vol.Schema(out)
 
 

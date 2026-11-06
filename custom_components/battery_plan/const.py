@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -17,6 +17,7 @@ SEC_EXPORT = "export"
 SEC_LOAD = "load"
 SEC_OCTOPUS = "octopus"
 SEC_ACTUALS = "actuals"
+SEC_CONTROL = "control"
 
 # Battery
 CONF_SOC_ENTITY = "soc_entity"
@@ -62,9 +63,24 @@ CONF_TARGET_TIME_ENTITY = "target_time_entity"
 CONF_SAVING_CALENDAR = "saving_calendar"
 CONF_FREE_CALENDAR = "free_calendar"
 
+# Control (optional, off by default)
+CONF_SETPOINT_ENTITY = "grid_setpoint_entity"
+CONF_CURRENT_ENTITY = "charge_current_entity"
+CONF_IDLE_SETPOINT_W = "idle_setpoint_w"
+CONF_CHARGE_SETPOINT_W = "charge_setpoint_w"
+CONF_SETPOINT_DEADBAND_W = "setpoint_deadband_w"
+CONF_BATTERY_VOLTAGE = "battery_voltage"
+CONF_STALE_MIN = "stale_minutes"
+CONF_HEARTBEAT_TOPIC = "heartbeat_topic"
+CONTROL_INTERVAL = timedelta(seconds=30)
+
 # Actuals
 CONF_GRID_POWER_ENTITY = "grid_power_entity"
 CONF_GRID_POWER_INVERT = "grid_power_invert"
+CONF_BATTERY_POWER_ENTITY = "battery_power_entity"
+CONF_BATTERY_POWER_INVERT = "battery_power_invert"
+ACTION_ON_KW = 0.5
+ACTION_OFF_KW = 0.2
 
 CHARGE_MODES = ["spread", "max"]
 WEEKDAYS = ["none", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -91,6 +107,12 @@ DEFAULTS: dict = {
     CONF_LOAD_KW: 0.8,
     CONF_DISPATCH_CHARGES: True,
     CONF_GRID_POWER_INVERT: False,
+    CONF_BATTERY_POWER_INVERT: False,
+    CONF_IDLE_SETPOINT_W: -50,
+    CONF_CHARGE_SETPOINT_W: 0,
+    CONF_SETPOINT_DEADBAND_W: 100,
+    CONF_BATTERY_VOLTAGE: 51.2,
+    CONF_STALE_MIN: 15,
 }
 
 SECTIONS: dict[str, list[str]] = {
@@ -118,5 +140,15 @@ SECTIONS: dict[str, list[str]] = {
         CONF_SAVING_CALENDAR,
         CONF_FREE_CALENDAR,
     ],
-    SEC_ACTUALS: [CONF_GRID_POWER_ENTITY, CONF_GRID_POWER_INVERT],
+    SEC_ACTUALS: [CONF_GRID_POWER_ENTITY, CONF_GRID_POWER_INVERT, CONF_BATTERY_POWER_ENTITY, CONF_BATTERY_POWER_INVERT],
+    SEC_CONTROL: [
+        CONF_SETPOINT_ENTITY,
+        CONF_CURRENT_ENTITY,
+        CONF_IDLE_SETPOINT_W,
+        CONF_CHARGE_SETPOINT_W,
+        CONF_SETPOINT_DEADBAND_W,
+        CONF_BATTERY_VOLTAGE,
+        CONF_STALE_MIN,
+        CONF_HEARTBEAT_TOPIC,
+    ],
 }

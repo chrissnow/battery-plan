@@ -11,6 +11,7 @@ class BatteryPlanCard extends HTMLElement {
       schema: [
         { name: 'entity', required: true, selector: { entity: { domain: 'sensor', integration: 'battery_plan' } } },
         { name: 'soc_entity', selector: { entity: { domain: 'sensor', device_class: 'battery' } } },
+        { name: 'action_entity', selector: { entity: { domain: 'sensor', integration: 'battery_plan' } } },
         { name: 'title', selector: { text: {} } },
         { type: 'grid', name: '', schema: [
           { name: 'hours_past', selector: { number: { min: 0, max: 48, mode: 'box', unit_of_measurement: 'h' } } },
@@ -18,7 +19,7 @@ class BatteryPlanCard extends HTMLElement {
         ] },
         { name: 'show_costs', selector: { boolean: {} } },
       ],
-      computeLabel: s => ({ entity: 'Battery Plan sensor (SOC at next charge)', soc_entity: 'Actual SOC sensor (optional)', title: 'Title',
+      computeLabel: s => ({ entity: 'Battery Plan sensor (SOC at next charge)', soc_entity: 'Actual SOC sensor (optional)', action_entity: 'Battery action sensor (optional, for past bands)', title: 'Title',
         hours_past: 'History shown', height: 'Chart height', show_costs: 'Show planned costs' }[s.name]),
     };
   }
@@ -44,25 +45,34 @@ class BatteryPlanCard extends HTMLElement {
     return this._config.soc_entity || (st && st.attributes.soc_entity);
   }
 
+  _actionEntity() {
+    const st = this._hass && this._hass.states[this._config.entity];
+    return this._config.action_entity || (st && st.attributes.action_entity);
+  }
+
   set hass(hass) {
     this._hass = hass;
     const st = hass.states[this._config.entity];
     const key = st ? st.last_updated : '';
     const now = Date.now();
-    if (this._socEntity() && now - this._histAt > 300000) { this._histAt = now; this._loadHistory(); }
+    if ((this._socEntity() || this._actionEntity()) && now - this._histAt > 300000) { this._histAt = now; this._loadHistory(); }
     if (key !== this._key) { this._key = key; this._render(); }
   }
 
   async _loadHistory() {
-    const soc = this._socEntity();
-    if (!soc || !this._config.hours_past) return;
+    const soc = this._socEntity(), act = this._actionEntity();
+    const ids = [soc, act].filter(Boolean);
+    if (!ids.length || !this._config.hours_past) return;
     try {
       const r = await this._hass.callWS({
         type: 'history/history_during_period',
         start_time: new Date(Date.now() - this._config.hours_past * 3600000).toISOString(),
-        entity_ids: [soc], minimal_response: true, no_attributes: true,
+        entity_ids: ids, minimal_response: true, no_attributes: true,
       });
-      this._hist = ((r && r[soc]) || []).map(x => [(x.lu || x.lc) * 1000, parseFloat(x.s)]).filter(x => !isNaN(x[1]));
+      this._hist = soc ? ((r && r[soc]) || []).map(x => [(x.lu || x.lc) * 1000, parseFloat(x.s)]).filter(x => !isNaN(x[1])) : [];
+      // past actions: [start, end, mode]
+      const rows = act ? ((r && r[act]) || []).map(x => [(x.lu || x.lc) * 1000, x.s]) : [];
+      this._past = rows.map((x, i) => [x[0], i + 1 < rows.length ? rows[i + 1][0] : Date.now(), x[1]]);
       this._render();
     } catch (e) { /* history is optional */ }
   }
@@ -111,6 +121,11 @@ class BatteryPlanCard extends HTMLElement {
     const y = v => T + (100 - v) / 100 * (H - T - B);
 
     let bands = '';
+    (this._past || []).forEach(([s, e, m]) => {
+      if (!BP_COLORS[m] || e <= t0) return;
+      const a0 = Math.max(s, t0), a1 = Math.min(e, now);
+      if (a1 > a0) bands += `<rect x="${x(a0)}" y="${T}" width="${x(a1) - x(a0)}" height="${H - T - B}" fill="${BP_COLORS[m]}" opacity="0.16"/>`;
+    });
     pts.forEach((p, i) => {
       if (!BP_COLORS[p.mode]) return;
       const s = i === 0 ? now : pts[i - 1].t;
@@ -135,7 +150,7 @@ class BatteryPlanCard extends HTMLElement {
     const fPts = (isNaN(socNow) ? [] : [[now, socNow]]).concat(pts.map(p => [p.t, p.soc]));
     const fPath = fPts.length ? 'M' + fPts.map(p => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join('L') : '';
     const area = fPts.length ? fPath + `L${x(fPts[fPts.length - 1][0])},${y(0)}L${x(fPts[0][0])},${y(0)}Z` : '';
-    const legend = Object.keys(BP_COLORS).filter(m => pts.some(p => p.mode === m))
+    const legend = Object.keys(BP_COLORS).filter(m => pts.some(p => p.mode === m) || (this._past || []).some(q => q[2] === m && q[1] > t0))
       .map(m => `<span><i style="background:${BP_COLORS[m]}"></i>${BP_NAMES[m]}</span>`).join('');
 
     const sub = !st ? `Entity ${c.entity} not found` : (a.soc_at_next_charge != null ? `${a.soc_at_next_charge}% at next charge · low ${a.min_soc_ahead}%` : 'waiting for plan');
@@ -196,9 +211,10 @@ class BatteryPlanCard extends HTMLElement {
       if (t >= now && pts.length) {
         const p = pts.find(q => q.t >= t) || pts[pts.length - 1];
         html = `<b>${this._fmtTime(p.t, true)}</b> · ${p.soc}%<br>${BP_NAMES[p.mode] || p.mode} · ${p.kw} kW${p.rate != null ? ` · ${p.rate}p export` : ''}`;
-      } else if (hist.length) {
+      } else if (hist.length || (this._past || []).length) {
         let h = hist[0]; for (const q of hist) { if (q[0] <= t) h = q; else break; }
-        html = `<b>${this._fmtTime(t, true)}</b> · ${h[1].toFixed(1)}% actual`;
+        const pa = (this._past || []).find(q => q[0] <= t && t < q[1]);
+        html = `<b>${this._fmtTime(t, true)}</b>${h ? ` · ${h[1].toFixed(1)}% actual` : ''}${pa ? `<br>${BP_NAMES[pa[2]] || pa[2]}` : ''}`;
       } else return;
       tip.innerHTML = html; tip.style.display = 'block';
       tip.style.left = Math.min(Math.max(0, px - tip.offsetWidth / 2), r.width - tip.offsetWidth) + 'px';

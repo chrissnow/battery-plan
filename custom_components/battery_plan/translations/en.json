@@ -120,11 +120,38 @@
             "name": "Actual costs",
             "data": {
               "grid_power_entity": "Grid power sensor",
-              "grid_power_invert": "Invert grid power"
+              "grid_power_invert": "Invert grid power",
+              "battery_power_entity": "Battery power sensor",
+              "battery_power_invert": "Invert battery power"
             },
             "data_description": {
               "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
-              "grid_power_invert": "Turn on if your sensor reports export as positive."
+              "grid_power_invert": "Turn on if your sensor reports export as positive.",
+              "battery_power_entity": "Optional: battery power (charging positive). Makes the Battery action sensor more accurate.",
+              "battery_power_invert": "Turn on if your sensor reports discharging as positive."
+            }
+          },
+          "control": {
+            "name": "Control (optional)",
+            "data": {
+              "grid_setpoint_entity": "Grid setpoint entity",
+              "charge_current_entity": "Charge current limit entity",
+              "idle_setpoint_w": "Idle grid setpoint",
+              "charge_setpoint_w": "Charging grid setpoint",
+              "setpoint_deadband_w": "Setpoint deadband",
+              "battery_voltage": "Battery voltage",
+              "stale_minutes": "Stale plan timeout",
+              "heartbeat_topic": "MQTT heartbeat topic"
+            },
+            "data_description": {
+              "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
+              "charge_current_entity": "Optional: number entity for the battery charge current limit (e.g. Victron DVCC max charge current), used for spread charging.",
+              "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
+              "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
+              "setpoint_deadband_w": "Changes smaller than this are not written.",
+              "battery_voltage": "Nominal voltage to convert charge power to current.",
+              "stale_minutes": "If the plan is older than this, control falls back to the idle setpoint.",
+              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED)."
             }
           }
         }
@@ -249,11 +276,38 @@
             "name": "Actual costs",
             "data": {
               "grid_power_entity": "Grid power sensor",
-              "grid_power_invert": "Invert grid power"
+              "grid_power_invert": "Invert grid power",
+              "battery_power_entity": "Battery power sensor",
+              "battery_power_invert": "Invert battery power"
             },
             "data_description": {
               "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
-              "grid_power_invert": "Turn on if your sensor reports export as positive."
+              "grid_power_invert": "Turn on if your sensor reports export as positive.",
+              "battery_power_entity": "Optional: battery power (charging positive). Makes the Battery action sensor more accurate.",
+              "battery_power_invert": "Turn on if your sensor reports discharging as positive."
+            }
+          },
+          "control": {
+            "name": "Control (optional)",
+            "data": {
+              "grid_setpoint_entity": "Grid setpoint entity",
+              "charge_current_entity": "Charge current limit entity",
+              "idle_setpoint_w": "Idle grid setpoint",
+              "charge_setpoint_w": "Charging grid setpoint",
+              "setpoint_deadband_w": "Setpoint deadband",
+              "battery_voltage": "Battery voltage",
+              "stale_minutes": "Stale plan timeout",
+              "heartbeat_topic": "MQTT heartbeat topic"
+            },
+            "data_description": {
+              "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
+              "charge_current_entity": "Optional: number entity for the battery charge current limit (e.g. Victron DVCC max charge current), used for spread charging.",
+              "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
+              "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
+              "setpoint_deadband_w": "Changes smaller than this are not written.",
+              "battery_voltage": "Nominal voltage to convert charge power to current.",
+              "stale_minutes": "If the plan is older than this, control falls back to the idle setpoint.",
+              "heartbeat_topic": "Optional: publishes \"on\" every 30 s while controlling and \"off\" when stopped, for a watchdog (e.g. in Node-RED)."
             }
           }
         }
@@ -328,11 +382,42 @@
       },
       "net_yesterday": {
         "name": "Net yesterday"
+      },
+      "target_grid_setpoint": {
+        "name": "Target grid setpoint"
+      },
+      "target_charge_current": {
+        "name": "Target charge current"
+      },
+      "control_status": {
+        "name": "Control status",
+        "state": {
+          "disabled": "Disabled (dry run)",
+          "active": "Active",
+          "fallback": "Fallback"
+        }
+      },
+      "battery_action": {
+        "name": "Battery action",
+        "state": {
+          "self": "House on battery",
+          "charge": "Charge",
+          "hold": "Hold",
+          "iog": "IOG top-up",
+          "export": "Export",
+          "saving": "Saving session export",
+          "grid": "Battery at minimum"
+        }
       }
     },
     "binary_sensor": {
       "final_slot_scheduled": {
         "name": "Final slot scheduled"
+      }
+    },
+    "switch": {
+      "control": {
+        "name": "Control"
       }
     }
   }

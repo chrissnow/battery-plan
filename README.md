@@ -4,7 +4,7 @@ A Home Assistant integration that plans a home battery's overnight charge and ev
 
 ![Battery Plan card](docs/card.png)
 
-It **plans and reports only**. It doesn't control your inverter: use its sensors in your own automations (or Node-RED) to act on the plan.
+It plans and reports by default. It can **optionally** drive your inverter's grid setpoint and charge current, but that's off until you turn on its Control switch (see [Control](#control-optional)).
 
 ## What it does
 
@@ -46,7 +46,8 @@ entity: sensor.battery_plan_soc_at_next_charge
 | Export | Max export power, saving-session power, minimum export price (p/kWh), discharge efficiency | |
 | House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback | Uses 5-minute statistics where the recorder still has them, hourly otherwise |
 | Intelligent Octopus & Octoplus | Dispatching sensor, whether dispatches charge the battery, ready-time entity, saving-session and free-electricity calendars | All optional |
-| Actual costs | Grid power sensor (import positive), invert switch | Optional; enables actual cost sensors |
+| Actual costs | Grid power sensor (import positive), battery power sensor (charging positive), invert switches | Optional; enables actual cost sensors and a more accurate Battery action sensor |
+| Control (optional) | Grid setpoint entity, charge current entity, idle and charging setpoints, deadband, battery voltage, stale timeout, MQTT heartbeat topic | Nothing is written until the Control switch is on |
 
 Everything can be changed later under **Configure**.
 
@@ -65,6 +66,31 @@ Entity IDs below assume the default name "Battery Plan".
 | `sensor.battery_plan_import_cost_today`, `…_export_earnings_today`, `…_net_today`, `…_net_yesterday` | Actual costs from the grid power sensor × live rates (needs a grid power sensor) |
 | `sensor.battery_plan_dispatch_hours_before_ready` | Hours of planned IOG dispatch in the 24 h before the ready time, with overlaps merged (needs dispatching + ready-time entities) |
 | `binary_sensor.battery_plan_final_slot_scheduled` | On when a dispatch covers the half hour before the ready time |
+| `sensor.battery_plan_battery_action` | What the battery is actually doing now (`export`, `charge`, `iog`, `saving`, `hold`, `grid`, `self`), from grid/battery power and the plan. Its history gives the card's past bands |
+| `sensor.battery_plan_target_grid_setpoint` | Grid setpoint the controller wants now (W): always computed, written only when Control is on |
+| `sensor.battery_plan_target_charge_current` | Charge current limit the controller wants now (A) |
+| `sensor.battery_plan_control_status` | `disabled` (dry run), `active` or `fallback`, with a `reason` attribute |
+| `switch.battery_plan_control` | Turns control on. Off by default; created only when a setpoint or current entity is set |
+
+## Control (optional)
+
+Every 30 seconds, and whenever the plan changes, the integration works out:
+
+- **Grid setpoint**: minus the planned export power in export and saving-session slots; the *charging setpoint* in charge, hold and IOG slots; otherwise the *idle setpoint*.
+- **Charge current limit**: the spread rate (energy still needed ÷ time to finish + make-up, converted with the battery voltage) inside the charge window, otherwise the maximum.
+
+These always appear as sensors, so you can compare them with what your current setup does before handing over. Turning on `switch.battery_plan_control` writes them to the number entities you chose (e.g. Victron's ESS AC power setpoint and DVCC max charge current).
+
+Safeguards:
+
+- Live SOC at or below the export floor → idle setpoint, whatever the plan says.
+- Export capped at your maximum (or saving-session) export power.
+- Plan stale or unavailable, or SOC unavailable → **fallback**: idle setpoint and maximum charge current.
+- Turning control off, unloading the integration or stopping Home Assistant → idle setpoint and maximum current written once.
+- Changes within the deadband aren't written.
+- Optional MQTT heartbeat: `on` every 30 s while controlling, `off` when stopped. [`docs/node-red-watchdog.json`](docs/node-red-watchdog.json) is a Node-RED flow for a Victron GX that resets the grid setpoint to −50 W if the heartbeat stops for 2 minutes (for example, if Home Assistant crashes).
+
+Charging itself is left to your inverter's own schedule (e.g. Victron ESS scheduled charge); the integration only sets the charge current. Turn off any other automation that writes the same setpoint before enabling control, or they'll fight.
 
 ### Forecast format
 

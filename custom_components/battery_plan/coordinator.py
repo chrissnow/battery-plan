@@ -97,6 +97,10 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._load_at: datetime | None = None
         self._load_source = "flat"
         self.costs = CostTracker(hass, entry, self)
+        self.action_entity_id: str | None = None
+        from .control import Controller
+
+        self.controller = Controller(hass, self)
 
     # ---------- configuration ----------
     def planner_config(self) -> P.PlannerConfig:
@@ -296,6 +300,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result["load_source"] = self._load_source
         result["standing_charge"] = self.standing_charge()
         result["soc_entity"] = self.opts[CONF_SOC_ENTITY]
+        result["action_entity"] = self.action_entity_id
 
         ready = self.ready_time(now)
         if ready is not None:
@@ -305,6 +310,15 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result["final_slot_scheduled"] = P.covers(disp, r_utc - timedelta(minutes=30), r_utc)
         self.costs.set_rates(imp, exp)
         return result
+
+    def current_slot(self, now: datetime | None = None) -> dict[str, Any] | None:
+        """Forecast slot covering now."""
+        now = now or dt_util.utcnow()
+        for f in (self.data or {}).get("forecast") or []:
+            t = dt_util.parse_datetime(f["t"])
+            if t and t > now:
+                return f
+        return None
 
     def standing_charge(self) -> float | None:
         eid = self.opts.get(CONF_STANDING_CHARGE)

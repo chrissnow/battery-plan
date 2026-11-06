@@ -1,0 +1,113 @@
+[
+ {
+  "id": "b1a7c0de00000001",
+  "type": "group",
+  "z": "5dcd501bec3e1b41",
+  "name": "Battery Plan watchdog: reset grid setpoint if HA control goes quiet",
+  "style": {
+   "label": true
+  },
+  "nodes": [
+   "b1a7c0de00000002",
+   "b1a7c0de00000003",
+   "b1a7c0de00000004",
+   "b1a7c0de00000005"
+  ],
+  "x": 54,
+  "y": 2499,
+  "w": 872,
+  "h": 122
+ },
+ {
+  "id": "b1a7c0de00000002",
+  "type": "mqtt in",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "name": "Battery Plan heartbeat",
+  "topic": "HomeAssistant/BatteryPlan/heartbeat",
+  "qos": "0",
+  "datatype": "utf8",
+  "broker": "fa1aacbd13c07bf6",
+  "nl": false,
+  "rap": true,
+  "rh": 0,
+  "inputs": 0,
+  "x": 200,
+  "y": 2540,
+  "wires": [
+   [
+    "b1a7c0de00000003"
+   ]
+  ]
+ },
+ {
+  "id": "b1a7c0de00000003",
+  "type": "trigger",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "name": "no 'on' for 2 min \u2192 -50 W ('off' cancels)",
+  "op1": "",
+  "op2": "-50",
+  "op1type": "nul",
+  "op2type": "num",
+  "duration": "2",
+  "extend": true,
+  "overrideDelay": false,
+  "units": "min",
+  "reset": "off",
+  "bytopic": "all",
+  "topic": "topic",
+  "outputs": 1,
+  "x": 470,
+  "y": 2540,
+  "wires": [
+   [
+    "b1a7c0de00000004",
+    "b1a7c0de00000005"
+   ]
+  ]
+ },
+ {
+  "id": "b1a7c0de00000004",
+  "type": "victron-output-ess",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "outputs": 0,
+  "service": "com.victronenergy.settings",
+  "path": "/Settings/CGwacs/AcPowerSetPoint",
+  "serviceObj": {
+   "service": "com.victronenergy.settings",
+   "name": "Venus settings",
+   "communityTag": "ess"
+  },
+  "pathObj": {
+   "path": "/Settings/CGwacs/AcPowerSetPoint",
+   "type": "integer",
+   "name": "Grid set-point (W)",
+   "mode": "both"
+  },
+  "name": "Grid setpoint",
+  "onlyChanges": false,
+  "x": 790,
+  "y": 2540,
+  "wires": []
+ },
+ {
+  "id": "b1a7c0de00000005",
+  "type": "debug",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "name": "watchdog fired",
+  "active": true,
+  "tosidebar": true,
+  "console": false,
+  "tostatus": true,
+  "complete": "payload",
+  "targetType": "msg",
+  "statusVal": "payload",
+  "statusType": "auto",
+  "x": 780,
+  "y": 2580,
+  "wires": []
+ }
+]

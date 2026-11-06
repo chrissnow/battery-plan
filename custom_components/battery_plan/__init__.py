@@ -15,7 +15,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import CARD_URL, DOMAIN, VERSION
 from .coordinator import BatteryPlanCoordinator
 
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type BatteryPlanConfigEntry = ConfigEntry[BatteryPlanCoordinator]
@@ -46,6 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BatteryPlanConfigEntry) 
     entry.async_on_unload(async_track_state_change_event(hass, coordinator.watched_entities(), _replan))
     entry.async_on_unload(entry.add_update_listener(_reload))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await coordinator.controller.async_start()
     return True
 
 
@@ -54,6 +55,7 @@ async def _reload(hass: HomeAssistant, entry: BatteryPlanConfigEntry) -> None:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: BatteryPlanConfigEntry) -> bool:
+    await entry.runtime_data.controller.async_stop()
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok:
         await entry.runtime_data.costs.async_stop()

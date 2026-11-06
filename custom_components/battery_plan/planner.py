@@ -121,6 +121,42 @@ def _iso(t: datetime) -> str:
     return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
 
 
+def charge_finish_by(cfg: PlannerConfig, t: datetime, tz: tzinfo) -> datetime | None:
+    """If ``t`` is inside the daily charge window, when spread charging should finish (UTC)."""
+    local = t.astimezone(tz)
+    sod = local.hour * 3600 + local.minute * 60 + local.second
+    if ((sod - cfg.charge_start) % 86400) >= cfg.charge_duration:
+        return None
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    bs = midnight + timedelta(seconds=cfg.charge_start)
+    if bs > local:
+        bs -= timedelta(days=1)
+    if cfg.target_soc >= 100:
+        early = (
+            cfg.long_balance_min
+            if cfg.long_balance_weekday is not None and bs.weekday() == cfg.long_balance_weekday
+            else cfg.finish_early_full_min
+        )
+    else:
+        early = cfg.finish_early_min
+    return bs.astimezone(timezone.utc) + timedelta(seconds=cfg.charge_duration) - timedelta(minutes=early)
+
+
+def spread_charge_kw(
+    cfg: PlannerConfig, soc: float, now: datetime, finish_by: datetime, previous: float | None
+) -> float:
+    """Charge power for spread mode: energy still needed / time left, plus make-up, clamped.
+
+    Not recalculated once within 5% of the target (keeps ``previous``), like a DVCC spreader.
+    """
+    spread = previous
+    if soc + 5 <= cfg.target_soc or spread is None:
+        hrs = (finish_by - now).total_seconds() / 3600
+        need = (cfg.target_soc - soc) / 100 * cfg.capacity_kwh
+        spread = cfg.max_charge_kw if hrs <= 0.1 else need / hrs + cfg.makeup_kw
+    return min(cfg.max_charge_kw, max(cfg.min_charge_kw, spread))
+
+
 def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
     now = inp.now.astimezone(timezone.utc)
     epoch = now.timestamp()
@@ -134,23 +170,8 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
         e = s + HALF
         frm = now if i == 0 else s
         local = s.astimezone(inp.tz)
-        sod = local.hour * 3600 + local.minute * 60
-        in_sched = ((sod - cfg.charge_start) % 86400) < cfg.charge_duration
-        finish_by = None
-        if in_sched:
-            midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
-            bs = midnight + timedelta(seconds=cfg.charge_start)
-            if bs > local:
-                bs -= timedelta(days=1)
-            if cfg.target_soc >= 100:
-                early = (
-                    cfg.long_balance_min
-                    if cfg.long_balance_weekday is not None and bs.weekday() == cfg.long_balance_weekday
-                    else cfg.finish_early_full_min
-                )
-            else:
-                early = cfg.finish_early_min
-            finish_by = bs.astimezone(timezone.utc) + timedelta(seconds=cfg.charge_duration) - timedelta(minutes=early)
+        finish_by = charge_finish_by(cfg, s, inp.tz)
+        in_sched = finish_by is not None
         in_free = _overlaps(s, e, free)
         iog_h = 0.0
         if not in_sched:
@@ -193,12 +214,7 @@ def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: l
         if sl.charge:
             kw = cfg.max_charge_kw
             if sl.sched and not sl.free and cfg.charge_mode == "spread":
-                soc_pct = kwh / cap * 100
-                if soc_pct + 5 <= cfg.target_soc or spread is None:
-                    hrs = (sl.finish_by - sl.frm).total_seconds() / 3600
-                    need = (cfg.target_soc - soc_pct) / 100 * cap
-                    spread = cfg.max_charge_kw if hrs <= 0.1 else need / hrs + cfg.makeup_kw
-                kw = min(cfg.max_charge_kw, max(cfg.min_charge_kw, spread))
+                kw = spread = spread_charge_kw(cfg, kwh / cap * 100, sl.frm, sl.finish_by, spread)
             batt = min(kw, (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
             mode = MODE_CHARGE if batt > 0 else MODE_HOLD
             imp_kw = batt / cfg.charge_eff + sl.load_kw
@@ -396,6 +412,8 @@ def day_key(t: datetime, tz: tzinfo) -> str:
 __all__ = [
     "PlannerConfig",
     "PlannerInputs",
+    "charge_finish_by",
+    "spread_charge_kw",
     "Rate",
     "plan",
     "merge_windows",
