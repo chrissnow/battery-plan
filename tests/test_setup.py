@@ -243,3 +243,60 @@ async def test_card_resource_registered_and_updated(hass: HomeAssistant, recorde
     await setup(hass, freezer, flat(SETTINGS))
     urls = sorted(r["url"] for r in res.async_items())
     assert urls == sorted(["/local/other.js", f"{CARD_URL}?v={VERSION}"])
+
+
+async def test_load_profile_skips_dispatches_and_sessions(hass, recorder_mock, octopus_states, freezer) -> None:
+    """IOG dispatches and Octoplus sessions don't count as normal house load."""
+    from homeassistant.components.recorder.models import StatisticMeanType
+    from homeassistant.components.recorder.statistics import async_import_statistics
+    from pytest_homeassistant_custom_component.components.recorder.common import async_wait_recording_done
+
+    start = NOW.replace(minute=0) - timedelta(days=3)
+    disp = start + timedelta(days=1, hours=-start.hour + 13)  # 13:00-14:00 two days ago: dispatch
+    free = disp + timedelta(days=1, hours=2)  # 15:00-16:00 yesterday: free session
+    win = start + timedelta(days=1, hours=-start.hour + 1)  # 01:00 inside the charge window
+    # recorded history for the dispatch sensor and the free-session calendar
+    for t, eid, st in ((start, "binary_sensor.dispatching", "off"), (start, "calendar.free", "off"),
+                       (win, "binary_sensor.dispatching", "on"), (win + timedelta(hours=1), "binary_sensor.dispatching", "off"),
+                       (disp, "binary_sensor.dispatching", "on"), (disp + timedelta(hours=1), "binary_sensor.dispatching", "off"),
+                       (free, "calendar.free", "on"), (free + timedelta(hours=1), "calendar.free", "off")):
+        freezer.move_to(t)
+        hass.states.async_set(eid, st, {"planned_dispatches": []} if eid.startswith("binary") else {})
+        await async_wait_recording_done(hass)
+    rows = []
+    for i in range(72):
+        t = start + timedelta(hours=i)
+        busy = t in (disp, free, win)
+        rows.append({"start": t, "mean": 9000.0 if busy else 500.0, "min": 0, "max": 0})
+    hass.states.async_set("sensor.load", "500", {"device_class": "power", "unit_of_measurement": "W", "state_class": "measurement"})
+    meta = {"source": "recorder", "statistic_id": "sensor.load", "name": None, "unit_of_measurement": "W",
+            "has_mean": True, "mean_type": StatisticMeanType.ARITHMETIC, "has_sum": False, "unit_class": "power"}
+    async_import_statistics(hass, meta, rows)
+    await async_wait_recording_done(hass)
+    opts = flat(SETTINGS) | {"load_entities": ["sensor.load"], "free_calendar": "calendar.free"}
+    await setup(hass, freezer, opts)
+    a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+    prof = a["load_profile_kw"]
+    assert prof[26] == prof[27] == pytest.approx(0.5)  # dispatch hour left out
+    assert prof[30] == prof[31] == pytest.approx(0.5)  # free session left out
+    assert prof[2] == pytest.approx((9 + 0.5 + 0.5) / 3, abs=0.01)  # inside the charge window: kept
+    assert a["load_masked_slots"] >= 4
+
+
+async def test_buckets_bridge_daily_masks(hass) -> None:
+    from custom_components.battery_plan.coordinator import BatteryPlanCoordinator as C
+
+    await hass.config.async_set_time_zone("Europe/London")
+
+    d0 = datetime(2026, 11, 1, tzinfo=timezone.utc)  # GMT: local == UTC
+    rows, masked = [], set()
+    for day in range(3):
+        for slot in range(48):
+            t = d0 + timedelta(days=day, minutes=30 * slot)
+            kw = 2.0 if slot < 24 else 1.0
+            if slot == 15:  # 07:30 dispatch every day
+                kw, _ = 9.0, masked.add(int(t.timestamp()))
+            rows.append({"start": t, "mean": kw})
+    out = C._buckets(rows, hourly=False, masked=masked)
+    assert out[15] == pytest.approx(2.0)  # bridged from 07:00 and 08:00, not 9 kW
+    assert out[0] == 2.0 and out[30] == 1.0

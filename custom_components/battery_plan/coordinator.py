@@ -100,6 +100,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._load: list[float] | None = None
         self._load_at: datetime | None = None
         self._load_source = "flat"
+        self._load_masked = 0
         self.costs = CostTracker(hass, entry, self)
         self.action_entity_id: str | None = None
         from .control import Controller
@@ -220,20 +221,105 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     @staticmethod
-    def _buckets(rows: list[dict], hourly: bool) -> list[float | None]:
-        """Average kW per local half-hour (48) from statistics rows."""
+    def _buckets(rows: list[dict], hourly: bool, masked: set[int] | None = None) -> list[float | None]:
+        """Average kW per local half-hour (48) from statistics rows.
+
+        ``masked`` holds UTC timestamps of half-hour slots to leave out (IOG
+        dispatches, Octoplus sessions); a half hour with nothing left falls
+        back to all its rows.
+        """
+        masked = masked or set()
         sums, counts = [0.0] * 48, [0] * 48
+        all_sums, all_counts = [0.0] * 48, [0] * 48
         for row in rows:
             m, st = row.get("mean"), row.get("start")
             if m is None or st is None:
                 continue
             ts = st if isinstance(st, datetime) else datetime.fromtimestamp(float(st), timezone.utc)
             loc = dt_util.as_local(ts)
-            b = loc.hour * 2 + (loc.minute >= 30)
-            for k in ((loc.hour * 2, loc.hour * 2 + 1) if hourly else (b,)):
-                sums[k] += max(0.0, float(m))
+            slot0 = int(ts.timestamp()) // 1800 * 1800
+            if hourly:
+                pairs = ((loc.hour * 2, slot0), (loc.hour * 2 + 1, slot0 + 1800))
+            else:
+                pairs = ((loc.hour * 2 + (loc.minute >= 30), slot0),)
+            v = max(0.0, float(m))
+            for k, slot in pairs:
+                all_sums[k] += v
+                all_counts[k] += 1
+                if slot in masked or (hourly and slot0 in masked):
+                    continue
+                sums[k] += v
                 counts[k] += 1
-        return [sums[i] / counts[i] if counts[i] else None for i in range(48)]
+        base: list[float | None] = [sums[i] / counts[i] if counts[i] else None for i in range(48)]
+        out = list(base)
+        known = [i for i in range(48) if base[i] is not None]
+        for i in range(48):
+            if base[i] is not None or not all_counts[i]:
+                continue
+            if not known:  # everything masked: use it all
+                out[i] = all_sums[i] / all_counts[i]
+                continue
+            # masked on every day (e.g. a daily dispatch): bridge from the nearest clean half hours
+            kp = next(k for k in range(1, 49) if base[(i - k) % 48] is not None)
+            kn = next(k for k in range(1, 49) if base[(i + k) % 48] is not None)
+            out[i] = (base[(i - kp) % 48] * kn + base[(i + kn) % 48] * kp) / (kp + kn)
+        return out
+
+    def _in_charge_window(self, ts: datetime) -> bool:
+        loc = dt_util.as_local(ts)
+        h, m, *_ = (int(x) for x in str(self.opts[CONF_CHARGE_START]).split(":"))
+        mins = (loc.hour * 60 + loc.minute - (h * 60 + m)) % 1440
+        return mins < float(self.opts[CONF_CHARGE_HOURS]) * 60
+
+    async def _masked_slots(self, start: datetime, end: datetime) -> set[int]:
+        """Half-hour slots (UTC epoch) that don't show normal house load.
+
+        - Intelligent Octopus dispatches outside the charge window (the battery
+          or other chargers top up then, and some of that is metered as load)
+        - Octoplus free-electricity and saving sessions
+        - outside the charge window, times our Battery action sensor saw the
+          battery charging from the grid
+        """
+        from homeassistant.components.recorder import get_instance, history
+
+        sources: dict[str, set[str]] = {}
+        for key in (CONF_DISPATCHING_ENTITY,):
+            if eid := self.opts.get(key):
+                sources[eid] = {"on"}
+        for key in (CONF_FREE_CALENDAR, CONF_SAVING_CALENDAR):
+            if eid := self.opts.get(key):
+                sources[eid] = {"on"}
+        from homeassistant.helpers import entity_registry as er
+
+        action = self.action_entity_id or er.async_get(self.hass).async_get_entity_id(
+            "sensor", DOMAIN, f"{self.config_entry.entry_id}_battery_action"
+        )
+        if action:
+            sources[action] = {"charge", "iog"}
+        if not sources:
+            return set()
+        states = await get_instance(self.hass).async_add_executor_job(
+            lambda: history.get_significant_states(
+                self.hass, start, end, list(sources), significant_changes_only=False, no_attributes=True
+            )
+        )
+        sessions = {self.opts.get(CONF_FREE_CALENDAR), self.opts.get(CONF_SAVING_CALENDAR)} - {None}
+        masked: set[int] = set()
+        for eid, rows in states.items():
+            on = sources.get(eid, set())
+            rows = [r for r in rows if hasattr(r, "state")]
+            for i, r in enumerate(rows):
+                if r.state not in on:
+                    continue
+                s = max(r.last_changed, start)
+                e = rows[i + 1].last_changed if i + 1 < len(rows) else end
+                t = int(s.timestamp()) // 1800 * 1800
+                while t < e.timestamp():
+                    slot = datetime.fromtimestamp(t, timezone.utc)
+                    if eid in sessions or not self._in_charge_window(slot + timedelta(minutes=15)):
+                        masked.add(t)
+                    t += 1800
+        return masked
 
     async def _load_profile(self, now: datetime) -> list[float]:
         """Half-hourly house load (kW): sum of load sensors minus excluded sensors.
@@ -258,9 +344,16 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._load_source = "flat"
             return [flat] * 48
 
+        try:
+            masked = await self._masked_slots(start, now)
+        except Exception as err:  # noqa: BLE001 - history unavailable: learn from everything
+            _LOGGER.debug("Battery Plan could not read dispatch/session history: %s", err)
+            masked = set()
+        self._load_masked = len(masked)
+
         def per_entity(eid: str) -> list[float | None]:
-            fine = self._buckets(short.get(eid, []), hourly=False)
-            coarse = self._buckets(long.get(eid, []), hourly=True)
+            fine = self._buckets(short.get(eid, []), hourly=False, masked=masked)
+            coarse = self._buckets(long.get(eid, []), hourly=True, masked=masked)
             return [f if f is not None else c for f, c in zip(fine, coarse)]
 
         loads = [per_entity(e) for e in ids]
@@ -306,6 +399,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result = await self.hass.async_add_executor_job(P.plan, cfg, inp)
         result["load_profile_kw"] = inp.load_kw
         result["load_source"] = self._load_source
+        result["load_masked_slots"] = self._load_masked
         result["standing_charge"] = self.standing_charge()
         result["soc_entity"] = self.opts[CONF_SOC_ENTITY]
         result["action_entity"] = self.action_entity_id
