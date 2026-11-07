@@ -31,6 +31,7 @@ from .const import (
     CONF_FREE_CALENDAR,
     CONF_GRID_POWER_ENTITY,
     CONF_GRID_POWER_INVERT,
+    CONF_USE_ENERGY_COSTS,
     CONF_IMPORT_RATES,
     CONF_LOAD_DAYS,
     CONF_LOAD_ENTITIES,
@@ -428,8 +429,57 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return _float(st.state) if st else None
 
 
+async def energy_grid_stats(hass: HomeAssistant) -> dict[str, list[str]] | None:
+    """Grid meters and their cost statistics from the Energy dashboard.
+
+    Returns {"import": [...], "import_cost": [...], "export": [...], "export_value": [...]}
+    or None when the dashboard has no priced grid source. Handles both the
+    flat grid format and the older flow_from / flow_to lists.
+    """
+    try:
+        from homeassistant.components.energy.data import async_get_manager
+
+        prefs = (await async_get_manager(hass)).data or {}
+    except Exception:  # noqa: BLE001 - energy not set up
+        return None
+    auto = (hass.data.get("energy") or {}).get("cost_sensors", {})
+    out: dict[str, list[str]] = {"import": [], "import_cost": [], "export": [], "export_value": []}
+    for src in prefs.get("energy_sources", []):
+        if src.get("type") != "grid":
+            continue
+        froms = src.get("flow_from") or ([src] if src.get("stat_energy_from") else [])
+        tos = src.get("flow_to") or ([src] if src.get("stat_energy_to") else [])
+        for f in froms:
+            cost = f.get("stat_cost") or auto.get(f["stat_energy_from"])
+            if cost:
+                out["import"].append(f["stat_energy_from"])
+                out["import_cost"].append(cost)
+        for t in tos:
+            comp = t.get("stat_compensation") or auto.get(t["stat_energy_to"])
+            if comp:
+                out["export"].append(t["stat_energy_to"])
+                out["export_value"].append(comp)
+    return out if out["import_cost"] else None
+
+
+def energy_prefs_priced(prefs: dict) -> bool:
+    """True if the Energy dashboard has a grid import with a price or cost statistic."""
+    for src in prefs.get("energy_sources", []):
+        if src.get("type") != "grid":
+            continue
+        for f in src.get("flow_from") or [src]:
+            if f.get("stat_cost") or f.get("entity_energy_price") or f.get("number_energy_price") is not None:
+                return True
+    return False
+
+
 class CostTracker:
-    """Integrates grid power x live rates into today's / yesterday's cost."""
+    """Today's / yesterday's actual grid cost.
+
+    From the Energy dashboard's cost statistics when it has priced grid meters
+    (so the figures match it, with full history), otherwise by integrating the
+    grid power sensor x live rates.
+    """
 
     STORE_VERSION = 1
 
@@ -446,6 +496,7 @@ class CostTracker:
         self._last_kw: float | None = None
         self._listeners: list = []
         self._entity_cbs: list = []
+        self._energy_ok = False
 
     @staticmethod
     def _blank(day: str) -> dict[str, Any]:
@@ -453,7 +504,59 @@ class CostTracker:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.coordinator.opts.get(CONF_GRID_POWER_ENTITY))
+        return self.source is not None
+
+    @property
+    def source(self) -> str | None:
+        if self._energy_ok:
+            return "energy_dashboard"
+        if self.coordinator.opts.get(CONF_GRID_POWER_ENTITY):
+            return "grid_power"
+        return None
+
+    async def async_detect(self) -> None:
+        """Decide the source before the sensors are created."""
+        self._energy_ok = False
+        if not self.coordinator.opts.get(CONF_USE_ENERGY_COSTS, True):
+            return
+        try:
+            from homeassistant.components.energy.data import async_get_manager
+
+            self._energy_ok = energy_prefs_priced((await async_get_manager(self.hass)).data or {})
+        except Exception:  # noqa: BLE001
+            self._energy_ok = False
+
+    async def _async_energy_refresh(self, *_: Any) -> None:
+        stats = await energy_grid_stats(self.hass)
+        if not stats:
+            return
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistic_during_period
+
+        now = dt_util.now()
+        today0 = dt_util.start_of_local_day(now)
+        yday0 = dt_util.start_of_local_day(today0 - timedelta(hours=12))
+
+        def change(ids: list[str], start: datetime, end: datetime, unit: dict | None) -> float:
+            tot = 0.0
+            for sid in ids:
+                r = statistic_during_period(self.hass, start, end, sid, {"change"}, unit)
+                tot += float(r.get("change") or 0.0)
+            return tot
+
+        def collect() -> tuple[dict, dict]:
+            out = []
+            for start, end in ((today0, now), (yday0, today0)):
+                d = self._blank(start.date().isoformat())
+                d["import_kwh"] = change(stats["import"], start, end, {"energy": "kWh"})
+                d["import_cost"] = change(stats["import_cost"], start, end, None)
+                d["export_kwh"] = change(stats["export"], start, end, {"energy": "kWh"})
+                d["export_value"] = change(stats["export_value"], start, end, None)
+                out.append(d)
+            return out[0], out[1]
+
+        self.today, self.yesterday = await get_instance(self.hass).async_add_executor_job(collect)
+        self._notify()
 
     def set_rates(self, imp: list[P.Rate], exp: list[P.Rate]) -> None:
         if imp:
@@ -474,6 +577,13 @@ class CostTracker:
             self.today = data["today"]
         self.yesterday = data.get("yesterday")
         self._rollover(dt_util.now())
+        await self.async_detect()
+        if self._energy_ok:
+            self._listeners.append(
+                async_track_time_interval(self.hass, self._async_energy_refresh, timedelta(minutes=5))
+            )
+            self.hass.async_create_task(self._async_energy_refresh())
+            return
         eid = self.coordinator.opts.get(CONF_GRID_POWER_ENTITY)
         if not eid:
             return
@@ -487,6 +597,8 @@ class CostTracker:
         for unsub in self._listeners:
             unsub()
         self._listeners.clear()
+        if self._energy_ok:
+            return
         self._accumulate(dt_util.utcnow())
         await self.store.async_save(self._data())
 

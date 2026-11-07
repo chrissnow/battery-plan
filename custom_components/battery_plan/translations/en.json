@@ -131,13 +131,15 @@
           "actuals": {
             "name": "Actual costs",
             "data": {
+              "use_energy_costs": "Use Energy dashboard costs",
               "grid_power_entity": "Grid power sensor",
               "grid_power_invert": "Invert grid power",
               "battery_power_entity": "Battery power sensor",
               "battery_power_invert": "Invert battery power"
             },
             "data_description": {
-              "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
+              "use_energy_costs": "Take actual import cost and export earnings from the Energy dashboard's grid cost statistics, so they match it. Falls back to the grid power sensor below.",
+              "grid_power_entity": "Optional: grid power (import positive). Used for actual costs when the Energy dashboard has no grid costs, and for the Battery action sensor.",
               "grid_power_invert": "Turn on if your sensor reports export as positive.",
               "battery_power_entity": "Optional: battery power (charging positive). Makes the Battery action sensor more accurate.",
               "battery_power_invert": "Turn on if your sensor reports discharging as positive."
@@ -303,13 +305,15 @@
           "actuals": {
             "name": "Actual costs",
             "data": {
+              "use_energy_costs": "Use Energy dashboard costs",
               "grid_power_entity": "Grid power sensor",
               "grid_power_invert": "Invert grid power",
               "battery_power_entity": "Battery power sensor",
               "battery_power_invert": "Invert battery power"
             },
             "data_description": {
-              "grid_power_entity": "Optional: grid power (import positive). Enables today's/yesterday's actual cost sensors.",
+              "use_energy_costs": "Take actual import cost and export earnings from the Energy dashboard's grid cost statistics, so they match it. Falls back to the grid power sensor below.",
+              "grid_power_entity": "Optional: grid power (import positive). Used for actual costs when the Energy dashboard has no grid costs, and for the Battery action sensor.",
               "grid_power_invert": "Turn on if your sensor reports export as positive.",
               "battery_power_entity": "Optional: battery power (charging positive). Makes the Battery action sensor more accurate.",
               "battery_power_invert": "Turn on if your sensor reports discharging as positive."

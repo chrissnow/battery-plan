@@ -218,7 +218,7 @@ class PlanSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
 
 
 class CostSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
-    """Actual grid cost from the grid power sensor x live rates."""
+    """Actual grid cost: Energy dashboard cost statistics, or grid power x live rates."""
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
@@ -280,6 +280,7 @@ class CostSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
             "export_value": round(d["export_value"], 2),
             "unpriced_kwh": round(d["unpriced_kwh"], 2),
             "standing_charge": self.coordinator.standing_charge(),
+            "source": self.coordinator.costs.source,
         }
 
 

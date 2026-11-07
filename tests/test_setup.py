@@ -300,3 +300,46 @@ async def test_buckets_bridge_daily_masks(hass) -> None:
     out = C._buckets(rows, hourly=False, masked=masked)
     assert out[15] == pytest.approx(2.0)  # bridged from 07:00 and 08:00, not 9 kW
     assert out[0] == 2.0 and out[30] == 1.0
+
+
+async def test_costs_from_energy_dashboard(hass, recorder_mock, octopus_states, freezer) -> None:
+    """With priced grid meters in the Energy dashboard, actual costs come from its statistics."""
+    from homeassistant.components.energy.data import async_get_manager
+    from homeassistant.components.recorder.models import StatisticMeanType
+    from homeassistant.components.recorder.statistics import async_import_statistics
+    from pytest_homeassistant_custom_component.components.recorder.common import async_wait_recording_done
+
+    freezer.move_to(NOW)
+    mgr = await async_get_manager(hass)
+    await mgr.async_update({"energy_sources": [{
+        "type": "grid",
+        "flow_from": [{"stat_energy_from": "sensor.meter_import", "stat_cost": "sensor.meter_import_cost",
+                       "entity_energy_price": None, "number_energy_price": None}],
+        "flow_to": [{"stat_energy_to": "sensor.meter_export", "stat_compensation": "sensor.meter_export_comp",
+                     "entity_energy_price": None, "number_energy_price": None}],
+        "cost_adjustment_day": 0,
+    }]})
+    # hourly sums: yesterday 00:00 -> now; 1 kWh import at 0.10 and 0.5 kWh export at 0.20 per hour
+    start = NOW.replace(hour=0, minute=0) - timedelta(days=1)
+    hours = int((NOW.replace(minute=0) - start).total_seconds() // 3600)
+    for sid, unit, per_h in (("sensor.meter_import", "kWh", 1.0), ("sensor.meter_import_cost", "GBP", 0.10),
+                             ("sensor.meter_export", "kWh", 0.5), ("sensor.meter_export_comp", "GBP", 0.10)):
+        rows = [{"start": start + timedelta(hours=i), "state": per_h * (i + 1), "sum": per_h * (i + 1)} for i in range(hours)]
+        meta = {"source": "recorder", "statistic_id": sid, "name": None, "unit_of_measurement": unit, "has_mean": False,
+                "mean_type": StatisticMeanType.NONE, "has_sum": True, "unit_class": "energy" if unit == "kWh" else None}
+        hass.states.async_set(sid, "0", {"unit_of_measurement": unit, "state_class": "total_increasing"})
+        async_import_statistics(hass, meta, rows)
+    await async_wait_recording_done(hass)
+    opts = flat(SETTINGS)
+    opts.pop("grid_power_entity")  # not needed with the Energy dashboard
+    await setup(hass, freezer, opts)
+    await hass.async_block_till_done()
+    imp = hass.states.get("sensor.battery_plan_import_cost_today")
+    assert imp.attributes["source"] == "energy_dashboard"
+    # today: 00:00 -> 22:00 complete hours = 22 h
+    assert float(imp.state) == pytest.approx(22 * 0.10, abs=0.11)
+    assert imp.attributes["import_kwh"] == pytest.approx(22, abs=1.01)
+    y = hass.states.get("sensor.battery_plan_net_yesterday")
+    assert y.attributes["date"] == "2026-11-02"
+    assert y.attributes["import_kwh"] == pytest.approx(24, abs=0.01)
+    assert float(y.state) == pytest.approx(24 * 0.10 - 24 * 0.10 - 0.507455, abs=0.01)

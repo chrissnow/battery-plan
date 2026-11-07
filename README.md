@@ -15,7 +15,7 @@ Every 5 minutes, and whenever rates or Intelligent Octopus dispatches change, it
 - **Octoplus**: saving sessions export at a higher power; free-electricity sessions charge at full power, and the battery is run down beforehand to make room.
 - **Exports**: before each charge window it keeps enough for the house load plus an export floor, then exports the rest in the best-priced half hours paying at least your minimum price. The floor can be higher during the day (e.g. 25% from 05:25 to 22:25, 20% overnight), and the minimum price can be lower before a free-electricity session so the battery empties to make room.
 - **House load**: learned as a half-hourly profile from your power sensors' statistics (last N days), minus any excluded sensors such as an EV charger, or a flat figure. Half hours that aren't normal house load are left out: Intelligent Octopus dispatches and grid charging outside the charge window, and Octoplus free-electricity and saving sessions. A half hour that's affected every day (e.g. a daily 07:30 dispatch) is filled in from the half hours either side.
-- **Costs**: planned import cost and export earnings per day, from your import and export rates, and optionally the actual cost from a grid power sensor.
+- **Costs**: planned import cost and export earnings per day, from your import and export rates. Actual costs come from the Energy dashboard's grid cost statistics when it has priced grid meters (so they match it), otherwise from a grid power sensor × live rates.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ entity: sensor.battery_plan_soc_at_next_charge
 | Export | Max export power, saving-session power, limited-export power, minimum export price, minimum price before a free session (p/kWh), SOC tracking, discharge efficiency | |
 | House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback | Uses 5-minute statistics where the recorder still has them, hourly otherwise |
 | Intelligent Octopus & Octoplus | Dispatching sensor, whether dispatches charge the battery, ready-time entity, saving-session and free-electricity calendars | All optional |
-| Actual costs | Grid power sensor (import positive), battery power sensor (charging positive), invert switches | Optional; enables actual cost sensors and a more accurate Battery action sensor |
+| Actual costs | Use Energy dashboard costs (on by default), grid power sensor (import positive), battery power sensor (charging positive), invert switches | Actual cost sensors appear if the Energy dashboard has priced grid meters or a grid power sensor is set. The battery power sensor makes the Battery action sensor more accurate |
 | Control (optional) | Grid setpoint entity, charge current entity, idle and charging setpoints, deadband, battery voltage, stale timeout, MQTT heartbeat topic, EV charger allow switch (+ invert) | Nothing is written until the Control switch is on |
 
 Everything can be changed later under **Configure**.
@@ -63,7 +63,7 @@ Entity IDs below assume the default name "Battery Plan".
 | `sensor.battery_plan_planned_export` | Planned export over the horizon (kWh) |
 | `sensor.battery_plan_net_today_estimate` | Today's actual so far (if a grid power sensor is set) plus the plan for the rest of today, minus standing charge |
 | `sensor.battery_plan_net_tomorrow_plan` | Tomorrow's planned export earnings minus import cost and standing charge |
-| `sensor.battery_plan_import_cost_today`, `…_export_earnings_today`, `…_net_today`, `…_net_yesterday` | Actual costs from the grid power sensor × live rates (needs a grid power sensor) |
+| `sensor.battery_plan_import_cost_today`, `…_export_earnings_today`, `…_net_today`, `…_net_yesterday` | Actual costs: from the Energy dashboard's grid cost and compensation statistics (`source: energy_dashboard`, refreshed every 5 minutes), or grid power × live rates (`source: grid_power`). Net figures subtract the standing charge |
 | `sensor.battery_plan_dispatch_hours_before_ready` | Hours of planned IOG dispatch in the 24 h before the ready time, with overlaps merged (needs dispatching + ready-time entities) |
 | `binary_sensor.battery_plan_final_slot_scheduled` | On when a dispatch covers the half hour before the ready time |
 | `sensor.battery_plan_battery_action` | What the battery is actually doing now (`export`, `charge`, `iog`, `saving`, `hold`, `grid`, `self`), from grid/battery power and the plan. Its history gives the card's past bands |

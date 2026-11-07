@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -89,6 +89,7 @@ CONF_GRID_POWER_ENTITY = "grid_power_entity"
 CONF_GRID_POWER_INVERT = "grid_power_invert"
 CONF_BATTERY_POWER_ENTITY = "battery_power_entity"
 CONF_BATTERY_POWER_INVERT = "battery_power_invert"
+CONF_USE_ENERGY_COSTS = "use_energy_costs"
 ACTION_ON_KW = 0.5
 ACTION_OFF_KW = 0.2
 
@@ -123,6 +124,7 @@ DEFAULTS: dict = {
     CONF_DISPATCH_CHARGES: True,
     CONF_GRID_POWER_INVERT: False,
     CONF_BATTERY_POWER_INVERT: False,
+    CONF_USE_ENERGY_COSTS: True,
     CONF_IDLE_SETPOINT_W: -50,
     CONF_CHARGE_SETPOINT_W: 0,
     CONF_SETPOINT_DEADBAND_W: 100,
@@ -172,7 +174,13 @@ SECTIONS: dict[str, list[str]] = {
         CONF_SAVING_CALENDAR,
         CONF_FREE_CALENDAR,
     ],
-    SEC_ACTUALS: [CONF_GRID_POWER_ENTITY, CONF_GRID_POWER_INVERT, CONF_BATTERY_POWER_ENTITY, CONF_BATTERY_POWER_INVERT],
+    SEC_ACTUALS: [
+        CONF_USE_ENERGY_COSTS,
+        CONF_GRID_POWER_ENTITY,
+        CONF_GRID_POWER_INVERT,
+        CONF_BATTERY_POWER_ENTITY,
+        CONF_BATTERY_POWER_INVERT,
+    ],
     SEC_CONTROL: [
         CONF_SETPOINT_ENTITY,
         CONF_CURRENT_ENTITY,
