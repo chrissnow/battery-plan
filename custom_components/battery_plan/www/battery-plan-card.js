@@ -162,7 +162,10 @@ class BatteryPlanCard extends HTMLElement {
     const legend = Object.keys(BP_COLORS).filter(m => pts.some(p => p.mode === m) || (this._past || []).some(q => q[2] === m && q[1] > t0))
       .map(m => `<span><i style="background:${BP_COLORS[m]}"></i>${BP_NAMES[m]}</span>`).join('');
 
-    const sub = !st ? `Entity ${c.entity} not found` : (a.soc_at_next_charge != null ? `${a.soc_at_next_charge}% at next charge · low ${a.min_soc_ahead}%` : 'waiting for plan');
+    // the sensor's state is the SOC at the next charge (older planners put it in an attribute)
+    const atCharge = a.soc_at_next_charge != null ? a.soc_at_next_charge : parseFloat(st && st.state);
+    const sub = !st ? `Entity ${c.entity} not found`
+      : (!isNaN(atCharge) && a.forecast ? `${atCharge}% at next charge · low ${a.min_soc_ahead}%` : 'waiting for plan');
 
     this.shadowRoot.innerHTML = `
       <style>
