@@ -178,3 +178,68 @@ async def test_load_profile_from_statistics(hass, recorder_mock, octopus_states,
     assert prof[36] == pytest.approx(2 * 2.2, abs=0.01)
     # 03:00 hour: 2 x 0.7 kW minus 7 kW EV -> clamped to 0
     assert prof[6] == 0
+
+
+def _initial_form_data(fields: list[dict]) -> dict:
+    """Mirror of the frontend's computeInitialHaFormData for the parts we use."""
+    out = {}
+    for f in fields:
+        sv = (f.get("description") or {}).get("suggested_value")
+        if sv is not None:
+            out[f["name"]] = sv
+        elif "default" in f:
+            out[f["name"]] = f["default"]
+        elif f.get("type") == "expandable":
+            inner = _initial_form_data(f["schema"])
+            if f.get("required") or inner:
+                out[f["name"]] = inner
+        elif f.get("required") and "selector" in f and "boolean" in f["selector"]:
+            out[f["name"]] = False
+    return out
+
+
+def _missing_required(fields: list[dict], data: dict) -> list[str]:
+    miss = []
+    for f in fields:
+        if f.get("type") == "expandable":
+            miss += _missing_required(f["schema"], data.get(f["name"]) or {})
+        elif f.get("required") and data.get(f["name"]) in (None, ""):
+            miss.append(f["name"])
+    return miss
+
+
+async def test_new_user_form_needs_only_battery_and_tariff(hass: HomeAssistant, recorder_mock, octopus_states) -> None:
+    """Untouched collapsed sections must arrive filled with their defaults (issue: 'Not all required fields')."""
+    import voluptuous_serialize
+    from homeassistant.helpers import config_validation as cv
+
+    res = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    res = await hass.config_entries.flow.async_configure(res["flow_id"], {"name": "Battery Plan"})
+    fields = voluptuous_serialize.convert(res["data_schema"], custom_serializer=cv.custom_serializer)
+    data = _initial_form_data(fields)
+    # only the fields a new user must pick are empty
+    assert sorted(_missing_required(fields, data)) == ["capacity_kwh", "import_rates", "soc_entity"]
+    data["battery"].update(soc_entity="sensor.batt_soc", capacity_kwh=61.7)
+    data["tariff"]["import_rates"] = ["event.imp_current", "event.imp_next"]
+    assert data["control"]["ev_allow_invert"] is False and data["export"]["export_tracking"] is True
+    res = await hass.config_entries.flow.async_configure(res["flow_id"], data)
+    assert res["type"] == "create_entry", res.get("errors")
+    assert res["options"]["export_tracking"] is True and res["options"]["charge_start"] == "23:30:00"
+
+
+async def test_card_resource_registered_and_updated(hass: HomeAssistant, recorder_mock, octopus_states, freezer) -> None:
+    from homeassistant.components.lovelace.const import LOVELACE_DATA
+    from homeassistant.setup import async_setup_component
+
+    from custom_components.battery_plan.const import CARD_URL, VERSION
+
+    assert await async_setup_component(hass, "lovelace", {})
+    res = hass.data[LOVELACE_DATA].resources
+    await res.async_load()
+    res.loaded = True
+    await res.async_create_item({"res_type": "module", "url": f"{CARD_URL}?v=0.0.1"})
+    await res.async_create_item({"res_type": "module", "url": f"{CARD_URL}?v=0.0.2"})
+    await res.async_create_item({"res_type": "module", "url": "/local/other.js"})
+    await setup(hass, freezer, flat(SETTINGS))
+    urls = sorted(r["url"] for r in res.async_items())
+    assert urls == sorted(["/local/other.js", f"{CARD_URL}?v={VERSION}"])

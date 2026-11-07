@@ -173,7 +173,9 @@ def build_schema(values: dict[str, Any], sections: list[str] | None = None) -> v
             else:
                 # suggested_value lets the user clear an optional entity
                 inner[vol.Optional(key, description={"suggested_value": cur})] = selector
-        key = vol.Required(sec_key) if sec_key in COLLAPSED else vol.Optional(sec_key, default={})
+        # No default on collapsed sections: the frontend uses a section's own default
+        # as-is, which would skip the defaults of the fields inside it.
+        key = vol.Required(sec_key) if sec_key in COLLAPSED else vol.Optional(sec_key)
         out[key] = section(vol.Schema(inner), {"collapsed": COLLAPSED.get(sec_key, True)})
     return vol.Schema(out)
 
@@ -186,6 +188,9 @@ def flatten(user_input: dict[str, Any]) -> dict[str, Any]:
         for key in keys:
             v = data.get(key)
             if v in (None, "", []):
+                # a required field missing from a section that wasn't sent: use its default
+                if FIELDS[key][1] and DEFAULTS.get(key) is not None:
+                    flat[key] = DEFAULTS[key]
                 continue
             flat[key] = v
     return flat

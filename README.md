@@ -27,9 +27,9 @@ Every 5 minutes, and whenever rates or Intelligent Octopus dispatches change, it
 
 1. HACS → ⋮ → **Custom repositories** → add this repository's URL with type **Integration**.
 2. Install **Battery Plan** and restart Home Assistant.
-3. **Settings → Devices & services → Add integration → Battery Plan**.
+3. **Settings → Devices & services → Add integration → Battery Plan**. Only the Battery and Tariff sections need filling in: the SOC sensor, capacity and import rate events. Everything else has defaults you can change later under **Configure**.
 
-The card is registered automatically. Add it with **Add card → Battery Plan**, or:
+The card is added to your dashboard resources automatically (and updated with each release). If a dashboard shows "Configuration error" right after an update, reload it or, in the mobile app, use **Settings → Companion app → Troubleshooting → Reset frontend cache**. Add it with **Add card → Battery Plan**, or:
 
 ```yaml
 type: custom:battery-plan-card
