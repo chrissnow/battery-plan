@@ -21,6 +21,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -30,6 +31,7 @@ from homeassistant.util import dt as dt_util
 
 from . import BatteryPlanConfigEntry
 from .const import (
+    CONF_WEATHER_ENTITY,
     ACTION_OFF_KW,
     ACTION_ON_KW,
     CONF_BATTERY_POWER_ENTITY,
@@ -46,7 +48,8 @@ from .coordinator import BatteryPlanCoordinator
 from .planner import MODES
 
 # Big attributes stay out of the recorder database
-BIG = frozenset({"forecast", "plan", "days", "load_profile_kw", "iog_dispatches"})
+BIG = frozenset({"forecast", "plan", "days", "load_profile_kw", "iog_dispatches", "weather_model", "charge_window",
+                 "load_entities", "load_exclude"})
 
 
 def device_info(entry: BatteryPlanConfigEntry) -> DeviceInfo:
@@ -168,7 +171,49 @@ PLAN_SENSORS: tuple[PlanSensorDescription, ...] = (
         attrs_fn=lambda c: {"ready_time": c.data.get("ready_time")},
         available_fn=lambda c: "ready_time" in c.data,
     ),
+    PlanSensorDescription(
+        key="weather_load_today",
+        translation_key="weather_load_today",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value_fn=lambda c: c.data.get("weather_load_today"),
+        attrs_fn=lambda c: _weather_slots(c, 0),
+        available_fn=lambda c: "weather_model" in c.data,
+    ),
+    PlanSensorDescription(
+        key="weather_load_tomorrow",
+        translation_key="weather_load_tomorrow",
+        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value_fn=lambda c: c.data.get("weather_load_tomorrow"),
+        attrs_fn=lambda c: _weather_slots(c, 1),
+        available_fn=lambda c: "weather_model" in c.data,
+    ),
+    PlanSensorDescription(
+        key="heating_sensitivity",
+        translation_key="heating_sensitivity",
+        native_unit_of_measurement="kW/°C",
+        suggested_display_precision=3,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: (c.data.get("weather_model") or {}).get("heating_kw_per_c"),
+        attrs_fn=lambda c: {k: v for k, v in (c.data.get("weather_model") or {}).items() if k != "daily"},
+        available_fn=lambda c: "weather_model" in c.data,
+    ),
 )
+
+
+def _weather_slots(c: BatteryPlanCoordinator, offset: int) -> dict[str, Any]:
+    """Half-hourly weather load (kW) and forecast temperature for that local day."""
+    day = (dt_util.now() + timedelta(days=offset)).date()
+    out = []
+    for f in c.data.get("forecast") or []:
+        t = dt_util.parse_datetime(f["t"])
+        if t is None or dt_util.as_local(t - timedelta(minutes=30)).date() != day:
+            continue
+        out.append({"t": f["t"], "kw": round((f.get("wh") or 0) + (f.get("wc") or 0), 2), "temp": f.get("tf")})
+    return {"status": (c.data.get("weather_model") or {}).get("status"), "slots": out}
 
 
 async def async_setup_entry(
@@ -179,6 +224,10 @@ async def async_setup_entry(
     for d in PLAN_SENSORS:
         if d.key == "dispatch_hours_before_ready" and not (
             c.opts.get(CONF_DISPATCHING_ENTITY) and c.opts.get(CONF_TARGET_TIME_ENTITY)
+        ):
+            continue
+        if d.key in ("weather_load_today", "weather_load_tomorrow", "heating_sensitivity") and not c.opts.get(
+            CONF_WEATHER_ENTITY
         ):
             continue
         ents.append(PlanSensor(c, entry, d))

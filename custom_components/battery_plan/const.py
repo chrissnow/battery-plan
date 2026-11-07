@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -65,6 +65,13 @@ CONF_LOAD_ENTITIES = "load_entities"
 CONF_LOAD_EXCLUDE = "load_exclude_entities"
 CONF_LOAD_DAYS = "load_days"
 CONF_LOAD_KW = "load_kw"
+CONF_WEATHER_ENTITY = "weather_entity"
+CONF_OUTDOOR_TEMP_ENTITY = "outdoor_temp_entity"
+CONF_WEATHER_LOAD_ENTITIES = "weather_load_entities"
+CONF_WEATHER_COOLING = "weather_cooling"
+CONF_WEATHER_DAYS = "weather_days"
+WEATHER_FIT_REFRESH = timedelta(hours=6)
+WEATHER_FORECAST_REFRESH = timedelta(minutes=30)
 
 # Octopus extras
 CONF_DISPATCHING_ENTITY = "dispatching_entity"
@@ -125,6 +132,8 @@ DEFAULTS: dict = {
     CONF_DISCHARGE_EFF: 0.9,
     CONF_LOAD_DAYS: 7,
     CONF_LOAD_KW: 0.8,
+    CONF_WEATHER_COOLING: False,
+    CONF_WEATHER_DAYS: 21,
     CONF_DISPATCH_CHARGES: True,
     CONF_GRID_POWER_INVERT: False,
     CONF_BATTERY_POWER_INVERT: False,
@@ -174,7 +183,17 @@ SECTIONS: dict[str, list[str]] = {
         CONF_EXPORT_TRACKING,
         CONF_DISCHARGE_EFF,
     ],
-    SEC_LOAD: [CONF_LOAD_ENTITIES, CONF_LOAD_EXCLUDE, CONF_LOAD_DAYS, CONF_LOAD_KW],
+    SEC_LOAD: [
+        CONF_LOAD_ENTITIES,
+        CONF_LOAD_EXCLUDE,
+        CONF_LOAD_DAYS,
+        CONF_LOAD_KW,
+        CONF_WEATHER_ENTITY,
+        CONF_OUTDOOR_TEMP_ENTITY,
+        CONF_WEATHER_LOAD_ENTITIES,
+        CONF_WEATHER_COOLING,
+        CONF_WEATHER_DAYS,
+    ],
     SEC_OCTOPUS: [
         CONF_DISPATCHING_ENTITY,
         CONF_DISPATCH_CHARGES,

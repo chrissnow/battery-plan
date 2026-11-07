@@ -110,13 +110,23 @@
               "load_entities": "House load power sensors",
               "load_exclude_entities": "Exclude power sensors",
               "load_days": "Days of history",
-              "load_kw": "Flat load"
+              "load_kw": "Flat load",
+              "weather_entity": "Weather forecast",
+              "outdoor_temp_entity": "Outdoor temperature sensor",
+              "weather_load_entities": "Weather-dependent loads",
+              "weather_cooling": "Learn cooling too",
+              "weather_days": "Days to learn weather from"
             },
             "data_description": {
               "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
               "load_days": "Days of statistics used for the load profile.",
               "load_kw": "Used when no load sensors are set, or for hours with no data.",
-              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power."
+              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power.",
+              "weather_entity": "Optional: a weather entity with hourly forecasts. Turns on weather-dependent load: the house load is adjusted for the forecast temperature, learned from your own history.",
+              "outdoor_temp_entity": "Optional: an outdoor temperature sensor to learn from. Without it, the weather entity's recorded temperature is used.",
+              "weather_load_entities": "Optional: power sensors for heating or cooling (e.g. heat pump input power). Without them, the effect is learned from the whole-house load. Leave out hot water if it runs off-peak.",
+              "weather_cooling": "Also learn extra load in hot weather (air conditioning).",
+              "weather_days": "How many days of history to learn the temperature effect from."
             }
           },
           "octopus": {
@@ -292,13 +302,23 @@
               "load_entities": "House load power sensors",
               "load_exclude_entities": "Exclude power sensors",
               "load_days": "Days of history",
-              "load_kw": "Flat load"
+              "load_kw": "Flat load",
+              "weather_entity": "Weather forecast",
+              "outdoor_temp_entity": "Outdoor temperature sensor",
+              "weather_load_entities": "Weather-dependent loads",
+              "weather_cooling": "Learn cooling too",
+              "weather_days": "Days to learn weather from"
             },
             "data_description": {
               "load_entities": "Optional: power sensors summed to learn an hourly load profile (e.g. AC loads L1–L3).",
               "load_days": "Days of statistics used for the load profile.",
               "load_kw": "Used when no load sensors are set, or for hours with no data.",
-              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power."
+              "load_exclude_entities": "Optional: subtracted from the load, e.g. an EV charger that charges on cheap-rate grid power.",
+              "weather_entity": "Optional: a weather entity with hourly forecasts. Turns on weather-dependent load: the house load is adjusted for the forecast temperature, learned from your own history.",
+              "outdoor_temp_entity": "Optional: an outdoor temperature sensor to learn from. Without it, the weather entity's recorded temperature is used.",
+              "weather_load_entities": "Optional: power sensors for heating or cooling (e.g. heat pump input power). Without them, the effect is learned from the whole-house load. Leave out hot water if it runs off-peak.",
+              "weather_cooling": "Also learn extra load in hot weather (air conditioning).",
+              "weather_days": "How many days of history to learn the temperature effect from."
             }
           },
           "octopus": {
@@ -460,6 +480,15 @@
           "saving": "Saving session export",
           "grid": "Battery at minimum"
         }
+      },
+      "weather_load_today": {
+        "name": "Weather load today"
+      },
+      "weather_load_tomorrow": {
+        "name": "Weather load tomorrow"
+      },
+      "heating_sensitivity": {
+        "name": "Heating sensitivity"
       }
     },
     "binary_sensor": {

@@ -5,7 +5,8 @@
     "calendar",
     "energy",
     "frontend",
-    "lovelace"
+    "lovelace",
+    "weather"
   ],
   "codeowners": [
     "@chrissnow"
@@ -20,5 +21,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/chrissnow/battery-plan/issues",
   "requirements": [],
-  "version": "0.4.0"
+  "version": "0.5.0"
 }

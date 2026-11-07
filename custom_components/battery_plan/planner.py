@@ -86,6 +86,9 @@ class PlannerInputs:
     saving_session: tuple[datetime, datetime] | None = None
     free_session: tuple[datetime, datetime] | None = None
     spread_kw: float | None = None  # charge rate already in force, if known
+    # weather-dependent load, per half-hour slot start (epoch):
+    # (load adjustment kW, heating kW, cooling kW, forecast temperature)
+    weather: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -104,6 +107,9 @@ class _Slot:
     floor: float  # export floor SOC % for this slot
     export_p: float | None  # p/kWh
     import_gbp: float | None  # GBP/kWh
+    heat_kw: float = 0.0
+    cool_kw: float = 0.0
+    temp: float | None = None
 
 
 def _rate_at(rates: list[Rate], t: datetime) -> float | None:
@@ -208,7 +214,11 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 saving=_overlaps(s, e, saving),
                 iog_h=iog_h,
                 finish_by=finish_by,
-                load_kw=float(inp.load_kw[local.hour * 2 + (local.minute >= 30)] if len(inp.load_kw) == 48 else inp.load_kw[local.hour]),
+                load_kw=max(0.0, float(inp.load_kw[local.hour * 2 + (local.minute >= 30)] if len(inp.load_kw) == 48 else inp.load_kw[local.hour])
+                            + (inp.weather.get(int(s.timestamp()), (0.0,))[0])),
+                heat_kw=inp.weather.get(int(s.timestamp()), (0.0, 0.0))[1],
+                cool_kw=inp.weather.get(int(s.timestamp()), (0.0, 0.0, 0.0))[2],
+                temp=inp.weather[int(s.timestamp())][3] if int(s.timestamp()) in inp.weather else None,
                 floor=floor_at(cfg, frm, inp.tz),
                 export_p=None if exp_gbp is None else exp_gbp * 100,
                 import_gbp=_rate_at(inp.import_rates, s),
@@ -342,11 +352,20 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
                 "fl": sl.floor,
             }
         )
+        if inp.weather:
+            if sl.heat_kw:
+                forecast[-1]["wh"] = _r(sl.heat_kw, 2)
+            if sl.cool_kw:
+                forecast[-1]["wc"] = _r(sl.cool_kw, 2)
+            if sl.temp is not None:
+                forecast[-1]["tf"] = _r(sl.temp, 1)
         d = days.setdefault(
             sl.start.astimezone(inp.tz).date().isoformat(),
             {"import_kwh": 0.0, "import_cost": 0.0, "export_kwh": 0.0, "export_value": 0.0, "priced": True, "hours": 0.0},
         )
         d["hours"] += sl.hours
+        if inp.weather:
+            d["weather_kwh"] = d.get("weather_kwh", 0.0) + (sl.heat_kw + sl.cool_kw) * sl.hours
         d["import_kwh"] += ik
         d["export_kwh"] += ek
         if sl.import_gbp is None and ik > 0:
@@ -354,8 +373,9 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
         d["import_cost"] += ik * (sl.import_gbp or 0)
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
-        for k in ("import_kwh", "import_cost", "export_kwh", "export_value"):
-            d[k] = _r(d[k], 2 if "kwh" in k else 3)
+        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh"):
+            if k in d:
+                d[k] = _r(d[k], 2 if "kwh" in k else 3)
         d["hours"] = _r(d["hours"], 2)
 
     blocks: list[dict] = []

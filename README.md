@@ -15,6 +15,7 @@ Every 5 minutes, and whenever rates or Intelligent Octopus dispatches change, it
 - **Octoplus**: saving sessions export at a higher power; free-electricity sessions charge at full power, and the battery is run down beforehand to make room.
 - **Exports**: before each charge window it keeps enough for the house load plus an export floor, then exports the rest in the best-priced half hours paying at least your minimum price. The floor can be higher during the day (e.g. 25% from 05:25 to 22:25, 20% overnight), and the minimum price can be lower before a free-electricity session so the battery empties to make room.
 - **House load**: learned as a half-hourly profile from your power sensors' statistics (last N days), minus any excluded sensors such as an EV charger, or a flat figure. Half hours that aren't normal house load are left out: Intelligent Octopus dispatches and grid charging outside the charge window, and Octoplus free-electricity and saving sessions. A half hour that's affected every day (e.g. a daily 07:30 dispatch) is filled in from the half hours either side.
+- **Weather-dependent load** (optional): learns how much your load rises in cold (and optionally hot) weather and adjusts the house load for the forecast temperature. See [Weather-dependent load](#weather-dependent-load-optional).
 - **Costs**: planned import cost and export earnings per day, from your import and export rates. Actual costs come from the Energy dashboard's grid cost statistics when it has priced grid meters (so they match it), otherwise from a grid power sensor × live rates.
 
 ## Requirements
@@ -44,7 +45,7 @@ entity: sensor.battery_plan_soc_at_next_charge
 | Tariff | Import rate events, export rate events, standing charge sensor | Pick the Octopus Energy `…_current_day_rates` **and** `…_next_day_rates` events for each meter |
 | Overnight charging | Optional inverter schedule entities (start, duration, target SOC) and BMS consumed-Ah sensor; window start and length, full power or spread, max/min/make-up power, finish-early minutes, an optional "long balance" night, charge efficiency | Schedule entities (e.g. Victron ESS schedule) override the window and target whenever they're available; the consumed-Ah sensor sizes spread charging from the BMS capacity |
 | Export | Max export power, saving-session power, limited-export power, minimum export price, minimum price before a free session (p/kWh), SOC tracking, discharge efficiency | |
-| House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback | Uses 5-minute statistics where the recorder still has them, hourly otherwise |
+| House load | Power sensors (summed, e.g. AC loads per phase), sensors to exclude (e.g. EV charger), days of history, flat fallback; weather forecast, outdoor temperature sensor, weather-dependent load sensors, cooling on/off, days to learn from | Uses 5-minute statistics where the recorder still has them, hourly otherwise. The weather settings are all optional |
 | Intelligent Octopus & Octoplus | Dispatching sensor, whether dispatches charge the battery, ready-time entity, saving-session and free-electricity calendars | All optional |
 | Actual costs | Use Energy dashboard costs (on by default), grid power sensor (import positive), battery power sensor (charging positive), invert switches | Actual cost sensors appear if the Energy dashboard has priced grid meters or a grid power sensor is set. The battery power sensor makes the Battery action sensor more accurate |
 | Control (optional) | Grid setpoint entity, charge current entity, idle and charging setpoints, deadband, battery voltage, stale timeout, MQTT heartbeat topic, EV charger allow switch (+ invert) | Nothing is written until the matching control switch is on |
@@ -70,11 +71,25 @@ Entity IDs below assume the default name "Battery Plan".
 | `sensor.battery_plan_target_grid_setpoint` | Grid setpoint the controller wants now (W): always computed, written only when Control is on |
 | `sensor.battery_plan_target_charge_current` | Charge current limit the controller wants now (A) |
 | `sensor.battery_plan_control_status` | `disabled` (dry run), `active` or `fallback`, with a `reason` attribute |
+| `sensor.battery_plan_weather_load_today`, `…_tomorrow` | Estimated heating/cooling load (kWh), with half-hourly `slots` (kW and forecast temperature). Only with a weather entity set |
+| `sensor.battery_plan_heating_sensitivity` | Diagnostic: learned kW per °C, with the balance point, fit quality, days learned from and `status` (`active` or `not_enough_data` with a `reason`) |
 | `switch.battery_plan_grid_setpoint_control` | Writes the grid setpoint (and the EV charger switch). Off by default; created when a setpoint entity is set. Installs from before 0.4.0 keep the id `switch.battery_plan_control` |
 | `switch.battery_plan_charge_current_control` | Writes the charge current limit. Off by default; created when a charge current entity is set |
 | `select.battery_plan_override` | `auto` (follow the plan), `hold`, `max_export`, `limited_export`, `saving`, `zero` or `custom`. Export overrides still stop at the floor |
 | `number.battery_plan_custom_setpoint` | Grid setpoint (W) used by the `custom` override |
 | `binary_sensor.battery_plan_ev_inhibit` | On while exporting 200 W or more outside the charge window, so an EV charger doesn't drain the battery |
+
+## Weather-dependent load (optional)
+
+Pick a weather entity with hourly forecasts (e.g. `weather.home`) under **House load** and the plan adjusts the house load for the forecast temperature:
+
+- **What it learns from**: your weather-dependent load sensors if you set them (e.g. heat pump heating input power), otherwise the whole-house load. Outdoor temperature comes from your sensor if set, otherwise the weather entity's recorded temperature.
+- **Model**: a baseline for each hour of the day (so your own setback and boost times are kept) plus one sensitivity in kW per °C below a heating balance point, and optionally above a cooling one. Balance points are learned (10–18 °C heating, 18–26 °C cooling). The outdoor temperature is smoothed over the previous hours, as buildings respond slowly. Dispatches, Octoplus sessions and, for whole-house learning, the charge window are left out.
+- **Forecast**: each half hour's load = the 7-day schedule + sensitivity × how much colder (or hotter) the forecast is than the same hour over those 7 days.
+- **Only when supported by the data**: at least 7 days, enough hours past the balance point, a sensible sensitivity, and the weather explaining at least 3% of the hour-to-hour variation. Otherwise the status says why and the plan uses the plain schedule. A gas-heated home or a mild month just gets "not in use yet".
+- **Hot water** usually runs off-peak and barely depends on the weather, so leave its sensors out.
+
+The card then shows a load strip under the SOC chart (base load in grey, heating in orange, cooling in blue, forecast temperature dashed, past actual load as a line), a "Heating adds … kWh" line, the heating included in each day's cost row, and a collapsed **Weather model** panel with daily load against temperature and the fitted line.
 
 ## Control (optional)
 
@@ -110,7 +125,8 @@ Each `forecast` item is one half-hour slot (`t` is the slot's end):
 | `ik`, `ek` | Grid import / export energy in the slot (kWh) |
 | `mode` | `self`, `charge`, `hold`, `iog`, `export`, `saving`, `grid` |
 | `rate`, `ip` | Export and import price (p/kWh) |
-| `ld` | Expected house load (kW) |
+| `ld` | Expected house load (kW), including any weather adjustment |
+| `wh`, `wc`, `tf` | Heating and cooling part of the load (kW) and forecast temperature (°C), with the weather model on |
 | `fl` | Export floor in force (%) |
 
 Other planners can publish the same attributes to use the card.
@@ -119,6 +135,7 @@ Other planners can publish the same attributes to use the card.
 
 - Rule-based, not an optimiser: it exports surplus in the best-priced slots, but doesn't trade off charging more to export more.
 - No solar forecast yet.
+- The weather model's sensitivity is shared across the day; it's learned from at most the recorder's history (default 10 days for raw weather-entity temperatures, longer with an outdoor sensor's statistics).
 - One charge window per day.
 - Dispatches are assumed to charge the battery at full power. Turn that off if your setup doesn't.
 

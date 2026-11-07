@@ -16,12 +16,20 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from . import planner as P
+from . import weather_load as W
 from .const import (
     CONF_CAPACITY_KWH,
     CONF_CHARGE_EFF,
     CONF_CHARGE_HOURS,
     CONF_CHARGE_MODE,
     CONF_CHARGE_START,
+    CONF_WEATHER_COOLING,
+    CONF_WEATHER_DAYS,
+    CONF_WEATHER_ENTITY,
+    CONF_WEATHER_LOAD_ENTITIES,
+    CONF_OUTDOOR_TEMP_ENTITY,
+    WEATHER_FIT_REFRESH,
+    WEATHER_FORECAST_REFRESH,
     CONF_CONSUMED_AH_ENTITY,
     CONF_SCHEDULE_DURATION_ENTITY,
     CONF_SCHEDULE_SOC_ENTITY,
@@ -107,6 +115,13 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._load_at: datetime | None = None
         self._load_source = "flat"
         self._load_masked = 0
+        self.weather_model: W.WeatherModel | None = None
+        self._w_fit_at: datetime | None = None
+        self._w_last_sm: float | None = None
+        self._w_past: dict[str, float] = {}  # local day -> weather kWh already happened
+        self._w_source = ""
+        self._w_forecast: list[tuple[datetime, float]] = []
+        self._w_forecast_at: datetime | None = None
         self.costs = CostTracker(hass, entry, self)
         self.action_entity_id: str | None = None
         from .control import Controller
@@ -444,11 +459,14 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         imp = self.rates(self.opts.get(CONF_IMPORT_RATES, []))
         exp = self.rates(self.opts.get(CONF_EXPORT_RATES, []))
         disp = self.dispatches()
+        load = await self._load_profile(now)
+        weather = await self._weather_inputs(now, cfg.horizon_slots)
         inp = P.PlannerInputs(
             now=now,
             tz=dt_util.get_default_time_zone(),
             soc=soc,
-            load_kw=await self._load_profile(now),
+            load_kw=load,
+            weather=weather,
             export_rates=exp,
             import_rates=imp,
             dispatches=disp,
@@ -460,6 +478,24 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result["load_source"] = self._load_source
         result["charge_window"] = self.schedule()
         result["load_masked_slots"] = self._load_masked
+        ids, excl = self._weather_load_ids()
+        result["load_entities"] = list(self.opts.get(CONF_LOAD_ENTITIES) or [])
+        result["load_exclude"] = [e for e in self.opts.get(CONF_LOAD_EXCLUDE) or [] if e not in result["load_entities"]]
+        if self.opts.get(CONF_WEATHER_ENTITY):
+            m = self.weather_model or W.WeatherModel(status="not_enough_data", reason="learning")
+            result["weather_model"] = m.as_dict() | {
+                "temperature_source": self._w_source,
+                "load_entities": ids,
+                "forecast_hours": len(self._w_forecast),
+            }
+            tz = dt_util.get_default_time_zone()
+            today = now.astimezone(tz).date()
+            days = result.get("days") or {}
+            for key, d in (("weather_load_today", today), ("weather_load_tomorrow", today + timedelta(days=1))):
+                ds = d.isoformat()
+                planned = (days.get(ds) or {}).get("weather_kwh")
+                past = self._w_past.get(ds, 0.0)
+                result[key] = None if (planned is None and not past) or not m.active else round((planned or 0.0) + past, 2)
         result["standing_charge"] = self.standing_charge()
         result["soc_entity"] = self.opts[CONF_SOC_ENTITY]
         result["action_entity"] = self.action_entity_id
@@ -472,6 +508,163 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result["final_slot_scheduled"] = P.covers(disp, r_utc - timedelta(minutes=30), r_utc)
         self.costs.set_rates(imp, exp)
         return result
+
+    # ---------- weather-dependent load ----------
+    def _weather_load_ids(self) -> tuple[list[str], list[str]]:
+        """(sensors to learn from, sensors to subtract): weather-dependent loads, else the house load."""
+        o = self.opts
+        if o.get(CONF_WEATHER_LOAD_ENTITIES):
+            return list(o[CONF_WEATHER_LOAD_ENTITIES]), []
+        ids = list(o.get(CONF_LOAD_ENTITIES) or [])
+        return ids, [e for e in o.get(CONF_LOAD_EXCLUDE) or [] if e not in ids]
+
+    async def _weather_inputs(self, now: datetime, horizon: int) -> dict[int, tuple[float, float, float, float]]:
+        if not self.opts.get(CONF_WEATHER_ENTITY):
+            self.weather_model = None
+            return {}
+        if self._w_fit_at is None or now - self._w_fit_at >= WEATHER_FIT_REFRESH:
+            try:
+                await self._fit_weather(now)
+            except Exception as err:  # noqa: BLE001 - never block the plan over the weather model
+                _LOGGER.warning("Battery Plan could not learn the weather-dependent load: %s", err)
+                self.weather_model = W.WeatherModel(status="not_enough_data", reason=f"error: {err}")
+            self._w_fit_at = now
+        if self._w_forecast_at is None or now - self._w_forecast_at >= WEATHER_FORECAST_REFRESH:
+            self._w_forecast = await self._weather_forecast()
+            self._w_forecast_at = now
+            if self.weather_model and self.weather_model.active:
+                await self._weather_today(now)
+        if not self.weather_model or not self.weather_model.active:
+            return {}
+        start0 = datetime.fromtimestamp(int(now.timestamp()) // 1800 * 1800, timezone.utc)
+        slots = [start0 + timedelta(minutes=30 * i) for i in range(horizon)]
+        return W.slot_adjustments(self.weather_model, self._w_forecast, self._w_last_sm, slots, dt_util.get_default_time_zone())
+
+    async def _weather_forecast(self) -> list[tuple[datetime, float]]:
+        eid = self.opts[CONF_WEATHER_ENTITY]
+        try:
+            resp = await self.hass.services.async_call(
+                "weather", "get_forecasts", {"entity_id": eid, "type": "hourly"}, blocking=True, return_response=True
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Battery Plan: no hourly forecast from %s: %s", eid, err)
+            return []
+        st = self.hass.states.get(eid)
+        f_unit = (st.attributes.get("temperature_unit") if st else None) == "°F"
+        out = []
+        for f in ((resp or {}).get(eid) or {}).get("forecast") or []:
+            t = dt_util.parse_datetime(str(f.get("datetime")))
+            v = _float(f.get("temperature"))
+            if t is None or v is None:
+                continue
+            out.append((dt_util.as_utc(t), (v - 32) / 1.8 if f_unit else v))
+        return sorted(out)
+
+    async def _hourly_temps(self, start: datetime, end: datetime) -> dict[int, float]:
+        """Hour start (epoch) -> outdoor temperature (degC)."""
+        from homeassistant.components.recorder import get_instance, history
+
+        o = self.opts
+        if eid := o.get(CONF_OUTDOOR_TEMP_ENTITY):
+            from homeassistant.components.recorder.statistics import statistics_during_period
+
+            stats = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period, self.hass, start, end, {eid}, "hour", {"temperature": "°C"}, {"mean"}
+            )
+            self._w_source = eid
+            out = {}
+            for row in stats.get(eid, []):
+                st, m = row.get("start"), row.get("mean")
+                if st is None or m is None:
+                    continue
+                ts = st.timestamp() if isinstance(st, datetime) else float(st)
+                out[int(ts) // 3600 * 3600] = float(m)
+            return out
+        # the weather entity's own recorded temperature
+        wid = o[CONF_WEATHER_ENTITY]
+        self._w_source = wid
+        states = await get_instance(self.hass).async_add_executor_job(
+            lambda: history.get_significant_states(self.hass, start, end, [wid], significant_changes_only=False)
+        )
+        sums: dict[int, list[float]] = {}
+        for st in states.get(wid, []):
+            if not hasattr(st, "attributes"):
+                continue
+            v = _float(st.attributes.get("temperature"))
+            if v is None:
+                continue
+            if st.attributes.get("temperature_unit") == "°F":
+                v = (v - 32) / 1.8
+            sums.setdefault(int(st.last_updated.timestamp()) // 3600 * 3600, []).append(v)
+        out = {h: sum(v) / len(v) for h, v in sums.items()}
+        # carry the last reading forward through hours without a change
+        if out:
+            h, last = min(out), None
+            while h <= int(end.timestamp()) // 3600 * 3600:
+                if h in out:
+                    last = out[h]
+                elif last is not None:
+                    out[h] = last
+                h += 3600
+        return out
+
+    async def _fit_weather(self, now: datetime) -> None:
+        o = self.opts
+        start = now - timedelta(days=int(o[CONF_WEATHER_DAYS]))
+        temps = await self._hourly_temps(start, now)
+        ids, excl = self._weather_load_ids()
+        if not ids:
+            self.weather_model = W.WeatherModel(status="not_enough_data", reason="no load or weather-load sensors set")
+            return
+        stats = await self._stats(set(ids + excl), start, now, "hour")
+        per: dict[str, dict[int, float]] = {}
+        for eid in ids + excl:
+            per[eid] = {}
+            for row in stats.get(eid, []):
+                st, m = row.get("start"), row.get("mean")
+                if st is None or m is None:
+                    continue
+                ts = st.timestamp() if isinstance(st, datetime) else float(st)
+                per[eid][int(ts)] = max(0.0, float(m))
+        try:
+            masked = await self._masked_slots(start, now)
+        except Exception:  # noqa: BLE001
+            masked = set()
+        whole_house = not o.get(CONF_WEATHER_LOAD_ENTITIES)
+        tz = dt_util.get_default_time_zone()
+        hours = sorted(temps)
+        smoothed = dict(W.smooth([(datetime.fromtimestamp(h, timezone.utc), temps[h]) for h in hours]))
+        rows: list[W.Row] = []
+        past: dict[str, float] = {}
+        for h in hours:
+            t = datetime.fromtimestamp(h, timezone.utc)
+            sm = smoothed.get(t)
+            if sm is None:
+                continue
+            loc = t.astimezone(tz)
+            if all(h in per[e] for e in ids) and h not in masked and h + 1800 not in masked:
+                # whole-house: the charge window isn't battery load and holds charger noise
+                if not (whole_house and self._in_charge_window(t + timedelta(minutes=30))):
+                    load = sum(per[e][h] for e in ids) - sum(per[e].get(h, 0.0) for e in excl)
+                    rows.append(W.Row(t, loc.hour, loc.date().isoformat(), sm, temps[h], max(0.0, load)))
+            past.setdefault(loc.date().isoformat(), 0.0)
+        self.weather_model = W.fit(rows, bool(o.get(CONF_WEATHER_COOLING)), int(o[CONF_LOAD_DAYS]), now)
+        self._w_last_sm = smoothed[datetime.fromtimestamp(hours[-1], timezone.utc)] if hours else None
+
+    async def _weather_today(self, now: datetime) -> None:
+        """Weather load that has already happened today, and a fresh seed for smoothing the forecast."""
+        tz = dt_util.get_default_time_zone()
+        today0 = dt_util.start_of_local_day(now.astimezone(tz))
+        temps = await self._hourly_temps(today0 - timedelta(hours=24), now)
+        hours = sorted(temps)
+        sm = W.smooth([(datetime.fromtimestamp(h, timezone.utc), temps[h]) for h in hours])
+        m = self.weather_model
+        done = sum(
+            m.heat_kw(v) + m.cool_kw(v) for t, v in sm if v is not None and t >= today0 and t + timedelta(hours=1) <= now
+        )
+        self._w_past = {today0.date().isoformat(): done}
+        if sm and sm[-1][1] is not None:
+            self._w_last_sm = sm[-1][1]
 
     def current_slot(self, now: datetime | None = None) -> dict[str, Any] | None:
         """Forecast slot covering now."""
