@@ -50,7 +50,7 @@ async def run(hass, freezer, secs=31):
 
 async def test_dry_run_writes_nothing(hass: HomeAssistant, octopus_states, freezer) -> None:
     _, calls = await setup(hass, freezer, control_opts())
-    assert val(hass, "switch.battery_plan_control") == "off"
+    assert val(hass, "switch.battery_plan_grid_setpoint_control") == "off"
     assert val(hass, "sensor.battery_plan_control_status") == "disabled"
     sp = float(val(hass, "sensor.battery_plan_target_grid_setpoint"))
     assert sp < -100  # exporting now (22:30, SOC 24% above 20% floor)
@@ -61,7 +61,7 @@ async def test_dry_run_writes_nothing(hass: HomeAssistant, octopus_states, freez
 
 async def test_enable_writes_with_deadband_and_revert(hass, octopus_states, freezer) -> None:
     _, calls = await setup(hass, freezer, control_opts())
-    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
     assert val(hass, "sensor.battery_plan_control_status") == "active"
     written = {c.data["entity_id"]: c.data["value"] for c in calls}
@@ -80,17 +80,33 @@ async def test_enable_writes_with_deadband_and_revert(hass, octopus_states, free
     hass.states.async_set(SP, "-50", {"min": -15000, "max": 15000})
     hass.states.async_set("sensor.batt_soc", "24.1", {"device_class": "battery", "unit_of_measurement": "%"})
     await run(hass, freezer)
-    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
-    assert calls[-1].data["entity_id"] in (SP, CUR)
-    last = {c.data["entity_id"]: c.data["value"] for c in calls[-2:]}
-    assert last.get(SP) == -50 and last.get(CUR) == pytest.approx(343.8, abs=0.5)
+    assert calls[-1].data == {"entity_id": SP, "value": -50.0}
+    assert all(c.data["entity_id"] != CUR for c in calls)  # setpoint switch never touches the current
     assert val(hass, "sensor.battery_plan_control_status") == "disabled"
+
+
+async def test_switches_are_independent(hass, octopus_states, freezer) -> None:
+    """Charge current control alone writes only the current; turning it off restores max."""
+    hass.states.async_set("sensor.batt_soc", "40", {"device_class": "battery", "unit_of_measurement": "%"})
+    _, calls = await setup(hass, freezer, control_opts(), at=datetime(2026, 11, 4, 0, 0, tzinfo=timezone.utc))
+    cur_sw = "switch.battery_plan_charge_current_control"
+    await hass.services.async_call("switch", "turn_on", {"entity_id": cur_sw}, blocking=True)
+    await hass.async_block_till_done()
+    assert {c.data["entity_id"] for c in calls} == {CUR}
+    assert calls[-1].data["value"] == float(val(hass, "sensor.battery_plan_target_charge_current")) < 300
+    a = hass.states.get(cur_sw).attributes
+    assert a["charge_current_control"] is True and a["setpoint_control"] is False
+    await hass.services.async_call("switch", "turn_off", {"entity_id": cur_sw}, blocking=True)
+    await hass.async_block_till_done()
+    assert calls[-1].data == {"entity_id": CUR, "value": pytest.approx(343.8, abs=0.5)}
+    assert all(c.data["entity_id"] != SP for c in calls)
 
 
 async def test_fallback_when_soc_unavailable(hass, octopus_states, freezer) -> None:
     _, calls = await setup(hass, freezer, control_opts())
-    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     hass.states.async_set("sensor.batt_soc", "unavailable")
     await run(hass, freezer)
     assert val(hass, "sensor.battery_plan_control_status") == "fallback"
@@ -111,10 +127,10 @@ async def test_heartbeat(hass, octopus_states, freezer) -> None:
     hass.config.components.add("mqtt")
     pub = async_mock_service(hass, "mqtt", "publish")
     await setup(hass, freezer, control_opts(heartbeat_topic="BatteryPlan/heartbeat"))
-    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
     assert pub and pub[-1].data == {"topic": "BatteryPlan/heartbeat", "payload": "on"}
-    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
     assert pub[-1].data["payload"] == "off"
 
@@ -137,3 +153,41 @@ async def test_battery_action(hass, octopus_states, freezer) -> None:
     await hass.async_block_till_done()
     assert val(hass, a) == "charge"
 
+
+
+async def test_spread_during_iog_dispatch(hass, octopus_states, freezer) -> None:
+    """07:30-08:00 dispatch at 95%: fill it, finishing 15 min early (07:45) rather than at full power."""
+    hass.states.async_set("sensor.batt_soc", "95", {"device_class": "battery", "unit_of_measurement": "%"})
+    await setup(hass, freezer, control_opts(), at=datetime(2026, 11, 4, 7, 30, tzinfo=timezone.utc))
+    kw = 0.05 * 61.7 / 0.25 + 0.26
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(kw * 1000 / 51.2, abs=0.5)
+    a = hass.states.get("sensor.battery_plan_control_status").attributes
+    assert a["top_up_finish_by"].startswith("2026-11-04T07:45")
+    # after the dispatch: full current again
+    await run(hass, freezer, 31 * 60)
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(343.8, abs=0.5)
+
+
+async def test_charge_window_from_inverter_schedule(hass, octopus_states, freezer) -> None:
+    """Window and target come from the inverter's schedule entities; capacity from the BMS."""
+    hass.states.async_set("time.ess_start", "00:00:00")
+    hass.states.async_set("number.ess_duration", "240", {"unit_of_measurement": "min"})
+    hass.states.async_set("number.ess_soc", "90", {"unit_of_measurement": "%"})
+    hass.states.async_set("sensor.batt_soc", "40", {"device_class": "battery", "unit_of_measurement": "%"})
+    hass.states.async_set("sensor.consumed_ah", "-690", {"unit_of_measurement": "Ah"})  # 690 / 0.6 = 1150 Ah
+    opts = control_opts(schedule_start_entity="time.ess_start", schedule_duration_entity="number.ess_duration",
+                        schedule_soc_entity="number.ess_soc", consumed_ah_entity="sensor.consumed_ah")
+    await setup(hass, freezer, opts, at=datetime(2026, 11, 4, 1, 0, tzinfo=timezone.utc))
+    # window 00:00-04:00, target 90% (<100: finish 15 min early -> 03:45), 2.75 h left, 1150 Ah
+    amps = 1150 * 0.5 / 2.75 + 0.26 * 1000 / 51.2
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(amps, abs=0.5)
+    a = hass.states.get("sensor.battery_plan_control_status").attributes
+    assert a["bms_capacity_ah"] == 1150
+    assert a["charge_window"]["source"] == {"start": "time.ess_start", "duration": "number.ess_duration", "target": "number.ess_soc"}
+    # the planner uses them too
+    plan = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+    assert plan["charge_window"]["duration"] == 4 * 3600 and plan["charge_window"]["target"] == 90
+    # schedule entity unavailable -> settings
+    hass.states.async_set("time.ess_start", "unavailable")
+    await run(hass, freezer)
+    assert hass.states.get("sensor.battery_plan_control_status").attributes["charge_window"]["source"]["start"] == "settings"

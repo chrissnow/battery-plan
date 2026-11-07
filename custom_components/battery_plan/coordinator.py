@@ -22,6 +22,11 @@ from .const import (
     CONF_CHARGE_HOURS,
     CONF_CHARGE_MODE,
     CONF_CHARGE_START,
+    CONF_CONSUMED_AH_ENTITY,
+    CONF_SCHEDULE_DURATION_ENTITY,
+    CONF_SCHEDULE_SOC_ENTITY,
+    CONF_SCHEDULE_START_ENTITY,
+    CONF_BATTERY_VOLTAGE,
     CONF_DISCHARGE_EFF,
     CONF_DISPATCH_CHARGES,
     CONF_DISPATCHING_ENTITY,
@@ -109,20 +114,72 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.controller = Controller(hass, self)
 
     # ---------- configuration ----------
+    def schedule(self) -> dict[str, Any]:
+        """Charge window and target, from the inverter's schedule entities where set and valid.
+
+        Returns {"start": seconds after midnight, "duration": seconds, "target": %,
+        "source": {...}} falling back to the settings for anything unavailable.
+        """
+        o = self.opts
+        start = _secs(o.get(CONF_CHARGE_START), "23:30:00")
+        dur = int(float(o[CONF_CHARGE_HOURS]) * 3600)
+        target = float(o[CONF_TARGET_SOC])
+        src = {"start": "settings", "duration": "settings", "target": "settings"}
+        if (eid := o.get(CONF_SCHEDULE_START_ENTITY)) and (st := self.hass.states.get(eid)):
+            v = st.attributes.get("timestamp") if eid.startswith("input_datetime.") else None
+            secs = None
+            if v is not None:
+                secs = int(float(v)) % 86400 if float(v) < 86400 else None
+            if secs is None and ":" in str(st.state):
+                t = dt_util.parse_time(str(st.state))
+                secs = t.hour * 3600 + t.minute * 60 + t.second if t else None
+            if secs is None and (n := _float(st.state)) is not None and 0 <= n < 86400:
+                secs = int(n)  # Victron reports seconds after midnight
+            if secs is not None:
+                start, src["start"] = secs, eid
+        if (eid := o.get(CONF_SCHEDULE_DURATION_ENTITY)) and (st := self.hass.states.get(eid)):
+            n = _float(st.state)
+            if n is not None and n > 0:
+                unit = (st.attributes.get("unit_of_measurement") or "").lower()
+                mult = {"s": 1, "sec": 1, "seconds": 1, "h": 3600, "hours": 3600}.get(unit, 60)
+                if 0 < n * mult <= 86400:
+                    dur, src["duration"] = int(n * mult), eid
+        if (eid := o.get(CONF_SCHEDULE_SOC_ENTITY)) and (st := self.hass.states.get(eid)):
+            n = _float(st.state)
+            if n is not None and 10 <= n <= 100:
+                target, src["target"] = n, eid
+        return {"start": start, "duration": dur, "target": target, "source": src}
+
+    def bms_capacity_ah(self, soc: float | None) -> float | None:
+        """Usable capacity from the BMS: consumed Ah / (100 - SOC), like the Node-RED spreader.
+
+        Only when the battery is far enough from full for the ratio to be meaningful,
+        and within 50-150 % of the configured capacity.
+        """
+        eid = self.opts.get(CONF_CONSUMED_AH_ENTITY)
+        st = self.hass.states.get(eid) if eid else None
+        used = _float(st.state) if st else None
+        if used is None or soc is None or soc > 95:
+            return None
+        ah = abs(used) * 100 / (100 - soc)
+        cfg_ah = float(self.opts[CONF_CAPACITY_KWH]) * 1000 / float(self.opts[CONF_BATTERY_VOLTAGE])
+        return ah if 0.5 * cfg_ah <= ah <= 1.5 * cfg_ah else None
+
     def planner_config(self) -> P.PlannerConfig:
         o = self.opts
         lb = o.get(CONF_LONG_BALANCE_DAY, "none")
+        sch = self.schedule()
         return P.PlannerConfig(
             capacity_kwh=float(o[CONF_CAPACITY_KWH]),
-            target_soc=float(o[CONF_TARGET_SOC]),
+            target_soc=sch["target"],
             reserve_soc=float(o[CONF_RESERVE_SOC]),
             min_soc=float(o[CONF_MIN_SOC]),
             day_reserve_soc=_float(o.get(CONF_DAY_RESERVE_SOC)),
             day_reserve_start=_secs(o.get(CONF_DAY_RESERVE_START), "05:25:00"),
             day_reserve_end=_secs(o.get(CONF_DAY_RESERVE_END), "22:25:00"),
             min_export_price_pre_free=_float(o.get(CONF_MIN_EXPORT_PRICE_PRE_FREE)),
-            charge_start=_secs(o.get(CONF_CHARGE_START), "23:30:00"),
-            charge_duration=int(float(o[CONF_CHARGE_HOURS]) * 3600),
+            charge_start=sch["start"],
+            charge_duration=sch["duration"],
             charge_mode=o[CONF_CHARGE_MODE],
             max_charge_kw=float(o[CONF_MAX_CHARGE_KW]),
             min_charge_kw=float(o[CONF_MIN_CHARGE_KW]),
@@ -143,7 +200,8 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Entities whose change should trigger a re-plan."""
         o = self.opts
         ids: list[str] = [*o.get(CONF_IMPORT_RATES, []), *o.get(CONF_EXPORT_RATES, [])]
-        for k in (CONF_DISPATCHING_ENTITY, CONF_TARGET_TIME_ENTITY):
+        for k in (CONF_DISPATCHING_ENTITY, CONF_TARGET_TIME_ENTITY, CONF_SCHEDULE_START_ENTITY,
+                  CONF_SCHEDULE_DURATION_ENTITY, CONF_SCHEDULE_SOC_ENTITY):
             if o.get(k):
                 ids.append(o[k])
         return ids
@@ -268,9 +326,9 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _in_charge_window(self, ts: datetime) -> bool:
         loc = dt_util.as_local(ts)
-        h, m, *_ = (int(x) for x in str(self.opts[CONF_CHARGE_START]).split(":"))
-        mins = (loc.hour * 60 + loc.minute - (h * 60 + m)) % 1440
-        return mins < float(self.opts[CONF_CHARGE_HOURS]) * 60
+        sch = self.schedule()
+        sod = loc.hour * 3600 + loc.minute * 60 + loc.second
+        return (sod - sch["start"]) % 86400 < sch["duration"]
 
     async def _masked_slots(self, start: datetime, end: datetime) -> set[int]:
         """Half-hour slots (UTC epoch) that don't show normal house load.
@@ -400,6 +458,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         result = await self.hass.async_add_executor_job(P.plan, cfg, inp)
         result["load_profile_kw"] = inp.load_kw
         result["load_source"] = self._load_source
+        result["charge_window"] = self.schedule()
         result["load_masked_slots"] = self._load_masked
         result["standing_charge"] = self.standing_charge()
         result["soc_entity"] = self.opts[CONF_SOC_ENTITY]

@@ -51,6 +51,10 @@
           "charging": {
             "name": "Overnight charging",
             "data": {
+              "schedule_start_entity": "Inverter schedule start",
+              "schedule_duration_entity": "Inverter schedule duration",
+              "schedule_soc_entity": "Inverter schedule target SOC",
+              "consumed_ah_entity": "BMS consumed amp-hours",
               "charge_start": "Charge window start",
               "charge_hours": "Charge window length",
               "charge_mode": "Charge rate",
@@ -64,6 +68,10 @@
               "charge_eff": "Charge efficiency"
             },
             "data_description": {
+              "schedule_start_entity": "Optional: your inverter's charge schedule start (e.g. Victron ESS schedule start). When set, it overrides the window start below.",
+              "schedule_duration_entity": "Optional: the schedule's duration (minutes unless the entity says otherwise). Overrides the window length below.",
+              "schedule_soc_entity": "Optional: the schedule's target SOC. Overrides the charge target.",
+              "consumed_ah_entity": "Optional: battery monitor consumed Ah. Spread charging then sizes the current from the BMS capacity (consumed Ah ÷ (100 − SOC)), like the Node-RED spreader.",
               "charge_start": "Start of the cheap-rate grid-charge window.",
               "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
               "max_charge_kw": "Battery-side charge power at full rate.",
@@ -160,8 +168,8 @@
               "ev_allow_invert": "Invert EV switch"
             },
             "data_description": {
-              "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
-              "charge_current_entity": "Optional: number entity for the battery charge current limit (e.g. Victron DVCC max charge current), used for spread charging.",
+              "grid_setpoint_entity": "Optional: number entity for the grid setpoint (e.g. Victron ESS AC power setpoint). Adds a 'Grid setpoint control' switch.",
+              "charge_current_entity": "Optional: number entity for the charge current limit (e.g. Victron DVCC max charge current). Adds a 'Charge current control' switch.",
               "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
               "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
               "setpoint_deadband_w": "Changes smaller than this are not written.",
@@ -225,6 +233,10 @@
           "charging": {
             "name": "Overnight charging",
             "data": {
+              "schedule_start_entity": "Inverter schedule start",
+              "schedule_duration_entity": "Inverter schedule duration",
+              "schedule_soc_entity": "Inverter schedule target SOC",
+              "consumed_ah_entity": "BMS consumed amp-hours",
               "charge_start": "Charge window start",
               "charge_hours": "Charge window length",
               "charge_mode": "Charge rate",
@@ -238,6 +250,10 @@
               "charge_eff": "Charge efficiency"
             },
             "data_description": {
+              "schedule_start_entity": "Optional: your inverter's charge schedule start (e.g. Victron ESS schedule start). When set, it overrides the window start below.",
+              "schedule_duration_entity": "Optional: the schedule's duration (minutes unless the entity says otherwise). Overrides the window length below.",
+              "schedule_soc_entity": "Optional: the schedule's target SOC. Overrides the charge target.",
+              "consumed_ah_entity": "Optional: battery monitor consumed Ah. Spread charging then sizes the current from the BMS capacity (consumed Ah ÷ (100 − SOC)), like the Node-RED spreader.",
               "charge_start": "Start of the cheap-rate grid-charge window.",
               "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
               "max_charge_kw": "Battery-side charge power at full rate.",
@@ -334,8 +350,8 @@
               "ev_allow_invert": "Invert EV switch"
             },
             "data_description": {
-              "grid_setpoint_entity": "Number entity for the grid power setpoint (e.g. Victron ESS AC power setpoint). Nothing is written until the Control switch is turned on.",
-              "charge_current_entity": "Optional: number entity for the battery charge current limit (e.g. Victron DVCC max charge current), used for spread charging.",
+              "grid_setpoint_entity": "Optional: number entity for the grid setpoint (e.g. Victron ESS AC power setpoint). Adds a 'Grid setpoint control' switch.",
+              "charge_current_entity": "Optional: number entity for the charge current limit (e.g. Victron DVCC max charge current). Adds a 'Charge current control' switch.",
               "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
               "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
               "setpoint_deadband_w": "Changes smaller than this are not written.",
@@ -456,7 +472,10 @@
     },
     "switch": {
       "control": {
-        "name": "Control"
+        "name": "Grid setpoint control"
+      },
+      "charge_current_control": {
+        "name": "Charge current control"
       }
     },
     "select": {

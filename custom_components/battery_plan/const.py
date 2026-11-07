@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.3.4"
+VERSION = "0.4.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -35,6 +35,10 @@ CONF_EXPORT_RATES = "export_rates"
 CONF_STANDING_CHARGE = "standing_charge_entity"
 
 # Charging
+CONF_SCHEDULE_START_ENTITY = "schedule_start_entity"
+CONF_SCHEDULE_DURATION_ENTITY = "schedule_duration_entity"
+CONF_SCHEDULE_SOC_ENTITY = "schedule_soc_entity"
+CONF_CONSUMED_AH_ENTITY = "consumed_ah_entity"
 CONF_CHARGE_START = "charge_start"
 CONF_CHARGE_HOURS = "charge_hours"
 CONF_CHARGE_MODE = "charge_mode"
@@ -145,6 +149,10 @@ SECTIONS: dict[str, list[str]] = {
     ],
     SEC_TARIFF: [CONF_IMPORT_RATES, CONF_EXPORT_RATES, CONF_STANDING_CHARGE],
     SEC_CHARGING: [
+        CONF_SCHEDULE_START_ENTITY,
+        CONF_SCHEDULE_DURATION_ENTITY,
+        CONF_SCHEDULE_SOC_ENTITY,
+        CONF_CONSUMED_AH_ENTITY,
         CONF_CHARGE_START,
         CONF_CHARGE_HOURS,
         CONF_CHARGE_MODE,

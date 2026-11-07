@@ -95,9 +95,9 @@ async def test_ev_inhibit(hass, octopus_states, freezer) -> None:
     await setup(hass, freezer, control_opts(ev_allow_entity="input_boolean.zappi_allow"))
     assert val(hass, "binary_sensor.battery_plan_ev_inhibit") == "on"  # exporting at 22:30
     assert not off  # control off: nothing switched
-    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
     assert off and off[-1].data["entity_id"] == "input_boolean.zappi_allow"
-    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_control"}, blocking=True)
+    await hass.services.async_call("switch", "turn_off", {"entity_id": "switch.battery_plan_grid_setpoint_control"}, blocking=True)
     await hass.async_block_till_done()
     assert on and on[-1].data["entity_id"] == "input_boolean.zappi_allow"  # allowed again on stop

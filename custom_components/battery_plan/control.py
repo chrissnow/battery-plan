@@ -6,16 +6,20 @@ Every 30 s, and whenever the plan updates, the controller works out:
   power if tracking is off); in saving-session slots the planned export; the
   charge setpoint in charge/hold/IOG slots; otherwise the idle setpoint. An
   override select (hold, max/limited export, saving, zero, custom) replaces the plan;
-- a charge current limit (A): the spread rate inside the charge window, else max;
+- a charge current limit (A): the spread rate inside the charge window and, outside
+  it, inside an IOG dispatch / free session (finishing the finish-early minutes
+  before it ends), else max;
 - EV inhibit: on while exporting at least 200 W outside the charge window.
 
-These are always published as sensors (dry run). Only when the control switch is
-on are they written to the configured number entities. Safeguards:
+These are always published as sensors (dry run). Two switches decide what is
+written: grid setpoint control (setpoint + EV charger) and charge current control.
+Safeguards:
 - live SOC at or below the export floor (day or night value) -> no export, whatever
   the plan or override says;
 - export capped at the configured maximum;
-- plan stale / unavailable or SOC unavailable -> fallback (idle setpoint, max current);
-- turning control off or unloading -> idle setpoint and max current written once;
+- plan stale / unavailable -> fallback idle setpoint (the charge current still
+  spreads, as it only needs SOC); SOC unavailable -> idle setpoint and max current;
+- turning a switch off or unloading -> idle setpoint / max current written once;
 - writes skipped when the change is within the deadband;
 - optional MQTT heartbeat ("on" while controlling, "off" when stopped) for an
   external watchdog.
@@ -23,6 +27,7 @@ on are they written to the configured number entities. Safeguards:
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Any
@@ -36,6 +41,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_BATTERY_VOLTAGE,
     CONF_CHARGE_SETPOINT_W,
+    CONF_CONSUMED_AH_ENTITY,
     CONF_CURRENT_ENTITY,
     CONF_EV_ALLOW_ENTITY,
     CONF_EV_ALLOW_INVERT,
@@ -79,7 +85,9 @@ class Controller:
     def __init__(self, hass: HomeAssistant, coordinator: BatteryPlanCoordinator) -> None:
         self.hass = hass
         self.coordinator = coordinator
-        self.enabled = False
+        self.setpoint_on = False
+        self.current_on = False
+        self.capacity_ah: float | None = None
         self.setpoint_w: float | None = None
         self.current_a: float | None = None
         self.mode: str | None = None
@@ -92,6 +100,8 @@ class Controller:
         self.floor: float | None = None
         self._ev_written: bool | None = None
         self._spread: float | None = None
+        self._topup_spread: float | None = None
+        self.topup_until: datetime | None = None
         self._written: dict[str, float] = {}
         self._unsubs: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
@@ -103,10 +113,13 @@ class Controller:
         self._unsubs.append(self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._on_stop))
         await self.async_run()
 
+    @property
+    def enabled(self) -> bool:
+        return self.setpoint_on or self.current_on
+
     async def _on_stop(self, _event: Event) -> None:
         self._unsubs = [u for u in self._unsubs if u is not None]
-        if self.enabled:
-            await self._revert("Home Assistant stopping")
+        await self._revert("Home Assistant stopping", self.setpoint_on, self.current_on)
 
     async def async_stop(self) -> None:
         for u in self._unsubs:
@@ -115,8 +128,7 @@ class Controller:
             except ValueError:  # one-shot listener already fired
                 pass
         self._unsubs.clear()
-        if self.enabled:
-            await self._revert("integration unloaded")
+        await self._revert("integration unloaded", self.setpoint_on, self.current_on)
 
     def add_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
         self._listeners.append(cb)
@@ -128,15 +140,22 @@ class Controller:
             return STATUS_DISABLED
         return STATUS_FALLBACK if self.fallback else STATUS_ACTIVE
 
-    async def async_set_enabled(self, on: bool) -> None:
-        if on == self.enabled:
-            return
-        self.enabled = on
+    async def async_set_enabled(self, on: bool, part: str = "setpoint") -> None:
+        """Turn grid setpoint ("setpoint") or charge current ("current") control on/off."""
+        if part == "current":
+            if on == self.current_on:
+                return
+            self.current_on = on
+        else:
+            if on == self.setpoint_on:
+                return
+            self.setpoint_on = on
         if on:
             self._written.clear()
             await self.async_run()
         else:
-            await self._revert("control switched off")
+            await self._revert(f"{'charge current' if part == 'current' else 'grid setpoint'} control switched off",
+                               part != "current", part == "current")
         self._notify()
 
     async def async_set_override(self, mode: str, custom_w: float | None = None) -> None:
@@ -177,6 +196,33 @@ class Controller:
         data = self.coordinator.data
         self.fallback = True
         self.setpoint_w, self.current_a, self.mode = idle, max_a, None
+        cfg = self.coordinator.planner_config()
+        st = self.hass.states.get(o[CONF_SOC_ENTITY])
+        soc = _f(st.state) if st and st.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE) else None
+        # charge current: only needs SOC, the charge window and dispatches, not a fresh plan
+        tz = dt_util.get_default_time_zone()
+        window_end = charge_finish_by(cfg, now, tz)
+        topup = None if window_end is not None else self._topup_finish(now, data, cfg)
+        self.topup_until = topup
+        finish = window_end or topup
+        if soc is not None and finish is not None and cfg.charge_mode == "spread":
+            ah = self.coordinator.bms_capacity_ah(soc)
+            if ah is not None or not o.get(CONF_CONSUMED_AH_ENTITY):
+                self.capacity_ah = ah  # near full the ratio isn't usable: keep the last value
+            spread_cfg = replace(cfg, capacity_kwh=self.capacity_ah * volts / 1000) if self.capacity_ah else cfg
+            if window_end is not None:
+                self._topup_spread = None
+                self._spread = spread_charge_kw(spread_cfg, soc, now, window_end, self._spread)
+                kw = self._spread
+            else:
+                # IOG dispatch / free session: fill it, finishing before the slot ends
+                self._spread = None
+                self._topup_spread = spread_charge_kw(spread_cfg, soc, now, topup, self._topup_spread)
+                kw = self._topup_spread
+            self.current_a = round(kw * 1000 / volts, 1)
+        else:
+            self._spread = self._topup_spread = None
+            self.current_a = round(max_a, 1)
         if not self.coordinator.last_update_success or not data:
             self.reason = "plan unavailable"
             return
@@ -184,24 +230,14 @@ class Controller:
         if gen is None or now - gen > timedelta(minutes=float(o[CONF_STALE_MIN])):
             self.reason = "plan is stale"
             return
-        st = self.hass.states.get(o[CONF_SOC_ENTITY])
-        soc = _f(st.state) if st and st.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE) else None
         if soc is None:
             self.reason = "SOC unavailable"
+            self.current_a = round(max_a, 1)
             return
         slot = next((f for f in data.get("forecast") or [] if (dt_util.parse_datetime(f["t"]) or now) > now), None)
         if slot is None:
             self.reason = "no plan for now"
             return
-
-        cfg = self.coordinator.planner_config()
-        finish = charge_finish_by(cfg, now, dt_util.get_default_time_zone())
-        if finish is not None and cfg.charge_mode == "spread":
-            self._spread = spread_charge_kw(cfg, soc, now, finish, self._spread)
-            self.current_a = round(self._spread * 1000 / volts, 1)
-        else:
-            self._spread = None
-            self.current_a = round(max_a, 1)
 
         self.mode = slot["mode"]
         self.fallback = False
@@ -254,6 +290,31 @@ class Controller:
             self.setpoint_w = idle
             self.reason = "house on battery" if self.mode == "self" else f"{self.mode} slot"
 
+    def _topup_finish(self, now: datetime, data: dict | None, cfg: Any) -> datetime | None:
+        """Inside an IOG dispatch (if they charge the battery) or a free session outside the
+        charge window: when to finish, i.e. the end of that block less the finish-early minutes."""
+        if not data:
+            return None
+        spans: list[tuple[datetime, datetime]] = []
+        raw = list(data.get("iog_dispatches") or []) if cfg.dispatch_charges_battery else []
+        if data.get("free_session"):
+            raw.append(data["free_session"])
+        for s_, e_ in raw:
+            s, e = dt_util.parse_datetime(s_), dt_util.parse_datetime(e_)
+            if s and e and e > s:
+                spans.append((s, e))
+        spans.sort()
+        merged: list[list[datetime]] = []
+        for s, e in spans:
+            if merged and s <= merged[-1][1] + timedelta(minutes=1):
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        for s, e in merged:
+            if s <= now < e:
+                return e - timedelta(minutes=cfg.finish_early_min)
+        return None
+
     def _live_load_kw(self, slot: dict) -> float:
         """House load now: load sensors minus excluded sensors, else the planned load."""
         o = self.coordinator.opts
@@ -289,11 +350,13 @@ class Controller:
         self.ev_inhibit = (
             not self.fallback and self.setpoint_w is not None and self.setpoint_w <= EV_INHIBIT_W and not in_window
         )
-        if self.enabled:
-            o = self.coordinator.opts
+        o = self.coordinator.opts
+        if self.setpoint_on:
             await self._write(o.get(CONF_SETPOINT_ENTITY), self.setpoint_w, float(o[CONF_SETPOINT_DEADBAND_W]))
-            await self._write(o.get(CONF_CURRENT_ENTITY), self.current_a, 1.0)
             await self._write_ev(not self.ev_inhibit)
+        if self.current_on:
+            await self._write(o.get(CONF_CURRENT_ENTITY), self.current_a, 1.0)
+        if self.enabled:
             await self._heartbeat("on")
         self._notify()
 
@@ -337,17 +400,25 @@ class Controller:
         self.last_write = dt_util.utcnow()
         _LOGGER.debug("Battery Plan set %s to %s (%s)", eid, value, self.reason)
 
-    async def _revert(self, why: str) -> None:
+    async def _revert(self, why: str, setpoint: bool, current: bool) -> None:
+        """Hand back: idle setpoint + EV allowed and/or maximum charge current."""
+        if not (setpoint or current):
+            return
         o = self.coordinator.opts
         idle, max_a = self._defaults()
-        self._written.clear()
-        await self._write(o.get(CONF_SETPOINT_ENTITY), idle, 0, force=True)
-        await self._write(o.get(CONF_CURRENT_ENTITY), round(max_a, 1), 0, force=True)
-        await self._write_ev(True, force=True)
-        self._ev_written = None
-        await self._heartbeat("off")
+        if setpoint:
+            self._written.pop(o.get(CONF_SETPOINT_ENTITY), None)
+            await self._write(o.get(CONF_SETPOINT_ENTITY), idle, 0, force=True)
+            await self._write_ev(True, force=True)
+            self._ev_written = None
+            _LOGGER.info("Battery Plan grid setpoint control stopped (%s): setpoint %s W", why, idle)
+        if current:
+            self._written.pop(o.get(CONF_CURRENT_ENTITY), None)
+            await self._write(o.get(CONF_CURRENT_ENTITY), round(max_a, 1), 0, force=True)
+            _LOGGER.info("Battery Plan charge current control stopped (%s): %.0f A", why, max_a)
+        if not self.enabled:
+            await self._heartbeat("off")
         self.reason = why
-        _LOGGER.info("Battery Plan control stopped (%s): setpoint %s W, charge current %.0f A", why, idle, max_a)
 
     async def _heartbeat(self, payload: str) -> None:
         topic = self.coordinator.opts.get(CONF_HEARTBEAT_TOPIC)
@@ -366,5 +437,10 @@ class Controller:
             "export_floor": self.floor,
             "ev_inhibit": self.ev_inhibit,
             "control_enabled": self.enabled,
+            "setpoint_control": self.setpoint_on,
+            "charge_current_control": self.current_on,
+            "bms_capacity_ah": round(self.capacity_ah) if self.capacity_ah else None,
+            "top_up_finish_by": self.topup_until.isoformat() if self.topup_until else None,
+            "charge_window": self.coordinator.schedule(),
             "last_write": self.last_write.isoformat() if self.last_write else None,
         }
