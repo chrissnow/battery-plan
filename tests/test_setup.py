@@ -20,7 +20,7 @@ SETTINGS = {
     "charging": {"charge_start": "23:30:00", "charge_hours": 6, "charge_mode": "spread", "max_charge_kw": 17.6,
                  "min_charge_kw": 0.51, "makeup_kw": 0.26, "finish_early_min": 15, "finish_early_full_min": 30,
                  "long_balance_day": "sat", "long_balance_min": 60, "charge_eff": 0.93},
-    "export": {"max_export_kw": 11, "saving_export_kw": 12, "min_export_price": 12.5, "discharge_eff": 0.9},
+    "export": {"max_export_kw": 11, "saving_export_kw": 12, "export_margin": 5, "discharge_eff": 0.9},
     "load": {"load_days": 7, "load_kw": 1.5},
     "octopus": {"dispatching_entity": "binary_sensor.dispatching", "dispatch_charges_battery": True,
                 "target_time_entity": "select.target_time"},
@@ -61,10 +61,14 @@ async def test_plan_sensors(hass: HomeAssistant, recorder_mock, octopus_states, 
     st = hass.states.get("sensor.battery_plan_soc_at_next_charge")
     assert st is not None, [s.entity_id for s in hass.states.async_all() if "battery_plan" in s.entity_id]
     a = st.attributes
-    assert float(st.state) == pytest.approx(20, abs=1)
+    # exports down to the 20% floor at 22:30 (20p beats the 6.6p refill by the margin), then the
+    # house load takes it a little lower before the window
+    assert float(st.state) == pytest.approx(18.6, abs=0.5)
     modes = [b["mode"] for b in a["plan"]]
-    assert modes[:4] == ["export", "charge", "hold", "iog"], modes
-    assert a["plan"][3]["start"].startswith("2026-11-04T07:30")
+    # 18p before the 07:30 dispatch beats its 6.6p refill: makes room for it first
+    assert modes[:5] == ["export", "charge", "hold", "export", "iog"], modes
+    assert a["plan"][4]["start"].startswith("2026-11-04T07:30")
+    assert a["plan"][3]["end"].startswith("2026-11-04T07:30")
     assert len(a["forecast"]) == 72
     assert a["load_source"] == "flat"
     day = a["days"]["2026-11-04"]
@@ -141,12 +145,12 @@ async def test_options_flow(hass, recorder_mock, octopus_states, freezer) -> Non
     entry = await setup(hass, freezer, flat(SETTINGS))
     res = await hass.config_entries.options.async_init(entry.entry_id)
     assert res["step_id"] == "init"
-    new = {**SETTINGS, "export": {**SETTINGS["export"], "min_export_price": 40}}
+    new = {**SETTINGS, "export": {**SETTINGS["export"], "export_margin": 40}}
     res = await hass.config_entries.options.async_configure(res["flow_id"], new)
     assert res["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
-    assert a["min_export_rate"] == 40 and a["export_kwh_planned"] == 0
+    assert a["export_margin"] == 40 and a["export_kwh_planned"] == 0
 
 
 async def test_load_profile_from_statistics(hass, recorder_mock, octopus_states, freezer) -> None:
@@ -343,3 +347,12 @@ async def test_costs_from_energy_dashboard(hass, recorder_mock, octopus_states, 
     assert y.attributes["date"] == "2026-11-02"
     assert y.attributes["import_kwh"] == pytest.approx(24, abs=0.01)
     assert float(y.state) == pytest.approx(24 * 0.10 - 24 * 0.10 - 0.507455, abs=0.01)
+
+
+async def test_charge_window_from_rates(hass, recorder_mock, octopus_states, freezer) -> None:
+    """The window comes from the import rates' off-peak period, not the settings (the 07:30 dispatch is ignored)."""
+    await setup(hass, freezer, flat(SETTINGS) | {"charge_start": "21:00:00", "charge_hours": 2, "charge_window_from_rates": True})
+    w = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes["charge_window"]
+    assert (w["start"], w["duration"]) == (23 * 3600 + 1800, 6 * 3600)
+    assert w["source"]["start"] == w["source"]["duration"] == "import rates"
+

@@ -32,6 +32,7 @@ from homeassistant.util import dt as dt_util
 from . import BatteryPlanConfigEntry
 from .const import (
     CONF_WEATHER_ENTITY,
+    CONF_CHARGE_SOC_ENTITY,
     ACTION_OFF_KW,
     ACTION_ON_KW,
     CONF_BATTERY_POWER_ENTITY,
@@ -233,7 +234,10 @@ async def async_setup_entry(
         ents.append(PlanSensor(c, entry, d))
     if c.costs.enabled:
         ents += [CostSensor(c, entry, k) for k in ("import_cost_today", "export_value_today", "net_today", "net_yesterday")]
-    ents += [ControlSensor(c, entry, k) for k in ("target_grid_setpoint", "target_charge_current", "control_status")]
+    keys = ["target_grid_setpoint", "target_charge_current", "control_status"]
+    if c.opts.get(CONF_CHARGE_SOC_ENTITY):
+        keys.insert(2, "target_charge_soc")
+    ents += [ControlSensor(c, entry, k) for k in keys]
     ents.append(ActionSensor(c, entry))
     async_add_entities(ents)
 
@@ -353,6 +357,10 @@ class ControlSensor(SensorEntity):
             self._attr_device_class = SensorDeviceClass.CURRENT
             self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
             self._attr_state_class = SensorStateClass.MEASUREMENT
+        elif key == "target_charge_soc":
+            self._attr_device_class = SensorDeviceClass.BATTERY
+            self._attr_native_unit_of_measurement = PERCENTAGE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
         else:
             self._attr_device_class = SensorDeviceClass.ENUM
             self._attr_options = STATUSES
@@ -366,6 +374,8 @@ class ControlSensor(SensorEntity):
             return self._ctl.setpoint_w
         if self._key == "target_charge_current":
             return self._ctl.current_a
+        if self._key == "target_charge_soc":
+            return self._ctl.charge_soc
         return self._ctl.status
 
     @property

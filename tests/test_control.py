@@ -191,3 +191,44 @@ async def test_charge_window_from_inverter_schedule(hass, octopus_states, freeze
     hass.states.async_set("time.ess_start", "unavailable")
     await run(hass, freezer)
     assert hass.states.get("sensor.battery_plan_control_status").attributes["charge_window"]["source"]["start"] == "settings"
+
+
+SCHED = "number.ess_schedule_5_soc"
+
+
+async def test_charge_schedule_soc(hass, octopus_states, freezer) -> None:
+    """Charge schedule target: parked outside charges, raised for dispatches, and for the window only when asked."""
+    hass.states.async_set(SCHED, "0", {"min": 0, "max": 100})
+    tgt = "sensor.battery_plan_target_charge_soc"
+    _, calls = await setup(hass, freezer, control_opts(charge_schedule_soc_entity=SCHED))
+    assert float(val(hass, tgt)) == 0  # 22:30, exporting: parked
+    await run(hass, freezer, 30 * 60)  # 23:00: still parked
+    assert float(val(hass, tgt)) == 0
+    await run(hass, freezer, 45 * 60)  # 23:45, in the window: left to the inverter's own schedule
+    assert float(val(hass, tgt)) == 0
+    await run(hass, freezer, 8 * 3600)  # 07:45, in the 07:30-08:00 dispatch: charge as the schedule would
+    assert float(val(hass, tgt)) == 100
+    assert calls == []  # charge control off: nothing written
+    # charge control on: the target is written; off again outside a charge: parked once
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_charge_current_control"}, blocking=True)
+    await hass.async_block_till_done()
+    assert any(c.data["entity_id"] == SCHED and c.data["value"] == 100 for c in calls)
+    await run(hass, freezer, 30 * 60)  # 08:15: dispatch over
+    assert float(val(hass, tgt)) == 0
+    assert calls[-1].data["entity_id"] in (SCHED, CUR)
+    assert any(c.data["entity_id"] == SCHED and c.data["value"] == 0 for c in calls)
+
+
+async def test_charge_schedule_soc_overnight(hass, octopus_states, freezer) -> None:
+    """With "charge overnight with the charge schedule" the window raises it too; control stopping there keeps it raised."""
+    hass.states.async_set(SCHED, "0", {"min": 0, "max": 100})
+    tgt = "sensor.battery_plan_target_charge_soc"
+    opts = control_opts(charge_schedule_soc_entity=SCHED, charge_schedule_window=True)
+    _, calls = await setup(hass, freezer, opts, at=datetime(2026, 11, 3, 23, 45, tzinfo=timezone.utc))
+    assert float(val(hass, tgt)) == 100
+    for on in ("turn_on", "turn_off"):
+        await hass.services.async_call("switch", on, {"entity_id": "switch.battery_plan_charge_current_control"}, blocking=True)
+        await hass.async_block_till_done()
+    sched = [c.data["value"] for c in calls if c.data["entity_id"] == SCHED]
+    assert sched and sched[-1] == 100  # no backstop schedule: keep the overnight charge going
+

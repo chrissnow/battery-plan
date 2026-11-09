@@ -9,10 +9,12 @@ Model, per half-hour slot over the horizon:
 - Inside an Intelligent Octopus dispatch (outside the window) the battery
   grid-charges at full power, if ``dispatch_charges_battery``.
 - Inside a free-electricity (power-up) session the battery charges at full power.
-- Otherwise the house runs from the battery. Before each charge window the
-  battery keeps enough for the load plus ``reserve_soc``; anything above that is
-  exported at ``max_export_kw`` in the best-priced slots paying at least
-  ``min_export_price``. Saving sessions export at ``saving_export_kw``.
+- Otherwise the house runs from the battery, down to ``min_soc``, then from grid.
+  Saving sessions export at ``saving_export_kw``.
+- Exports are chosen by one rule: export a kWh when it earns at least ``export_margin``
+  p/kWh more than keeping it would save, as the simulated plan shows (a smaller recharge
+  in the window, house load not bought later, nothing ahead of a free-electricity
+  session). Exports stop at the export floor of the time. See ``_ExportSearch``.
 """
 from __future__ import annotations
 
@@ -55,8 +57,10 @@ class PlannerConfig:
     long_balance_min: float = 60.0
     max_export_kw: float = 5.0
     saving_export_kw: float | None = None
-    min_export_price: float = 12.5  # p/kWh
-    min_export_price_pre_free: float | None = None  # p/kWh, before a free-electricity session
+    export_margin: float = 5.0  # p/kWh an export must earn over keeping the energy
+    export_peak_import: bool = False  # exports may leave the house buying at peak before the window
+    buy_ahead_h: float = 3.0  # with export_peak_import: hold / grid-charge at most this long before an export
+    night_cycle: bool = False  # may export inside the charge window and buy it back there
     discharge_eff: float = 0.9
     charge_eff: float = 0.93
     dispatch_charges_battery: bool = True
@@ -110,6 +114,8 @@ class _Slot:
     heat_kw: float = 0.0
     cool_kw: float = 0.0
     temp: float | None = None
+    next_charge: int = 0  # index of the first charge slot at or after this one (len(slots) if none)
+    buyback: int | None = None  # in a charge window: the slot ending at its finish-early time
 
 
 def _rate_at(rates: list[Rate], t: datetime) -> float | None:
@@ -162,6 +168,58 @@ def charge_finish_by(cfg: PlannerConfig, t: datetime, tz: tzinfo) -> datetime | 
     else:
         early = cfg.finish_early_min
     return bs.astimezone(timezone.utc) + timedelta(seconds=cfg.charge_duration) - timedelta(minutes=early)
+
+
+def offpeak_window(
+    rates: list[Rate], dispatches: list[tuple[datetime, datetime]], tz: tzinfo, min_hours: float = 2.0
+) -> tuple[int, int] | None:
+    """The daily off-peak window read from import rates: (start, duration), seconds after local midnight.
+
+    A half hour of the day is off-peak if it is at the lowest rate seen (within 0.1p) on every
+    day the rates cover. Half hours that overlap a planned dispatch (which Intelligent Octopus
+    also prices off-peak) don't count either way; inside the window they're filled in, so a
+    dispatch at 01:00 doesn't split it, while one just after it doesn't stretch it. The window
+    is the longest run of off-peak half hours, wrapping past midnight, of at least ``min_hours``.
+    None if there isn't one (e.g. Agile, or a flat rate): the configured window applies.
+    """
+    if not rates:
+        return None
+    low = min(r.price for r in rates)
+    cheap: list[bool | None] = [None] * 48
+    for r in rates:
+        t = r.start
+        while t < r.end:
+            e = min(r.end, t + HALF)
+            if not any(ds < e and de > t for ds, de in dispatches):
+                local = t.astimezone(tz)
+                k = local.hour * 2 + (local.minute >= 30)
+                c = r.price <= low + 0.001
+                cheap[k] = c if cheap[k] is None else (cheap[k] and c)
+            t = e
+    if all(c is not False for c in cheap) or not any(cheap):
+        return None  # flat rate, or nothing cheaper
+    # fill unknown half hours with an off-peak one on both sides
+    for k in range(48):
+        if cheap[k] is None:
+            before = next(cheap[(k - n) % 48] for n in range(1, 48) if cheap[(k - n) % 48] is not None)
+            after = next(cheap[(k + n) % 48] for n in range(1, 48) if cheap[(k + n) % 48] is not None)
+            if before and after:
+                cheap[k] = True
+    first = next(k for k in range(48) if cheap[k] is not True)
+    best_start, best_len, start, length = 0, 0, 0, 0
+    for n in range(1, 49):
+        k = (first + n) % 48
+        if cheap[k] is True:
+            if length == 0:
+                start = k
+            length += 1
+            if length > best_len:
+                best_start, best_len = start, length
+        else:
+            length = 0
+    if best_len * 0.5 < min_hours:
+        return None
+    return best_start * 1800, best_len * 1800
 
 
 def spread_charge_kw(
@@ -224,10 +282,33 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 import_gbp=_rate_at(inp.import_rates, s),
             )
         )
+    nxt = len(slots)
+    for i in range(len(slots) - 1, -1, -1):
+        if slots[i].charge:
+            nxt = i
+        slots[i].next_charge = nxt
+    i = 0
+    while i < len(slots):  # each charge window: energy sold in it is bought back by its finish-early time
+        if not (slots[i].sched and not slots[i].free):
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(slots) and slots[j + 1].sched and not slots[j + 1].free:
+            j += 1
+        ends = [k for k in range(i, j + 1) if slots[k].end <= slots[k].finish_by]
+        for k in range(i, j + 1):
+            slots[k].buyback = ends[-1] if ends else j
+        i = j + 1
     return slots
 
 
-def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: list[float]) -> list[dict]:
+def _simulate(
+    cfg: PlannerConfig,
+    inp: PlannerInputs,
+    slots: list[_Slot],
+    exp: list[float],
+    buy: list[float | None] | None = None,
+) -> list[dict]:
     cap = cfg.capacity_kwh
     kwh = inp.soc / 100 * cap
     min_kwh = min(cfg.min_soc, cfg.reserve_soc) / 100 * cap
@@ -237,7 +318,7 @@ def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: l
     rows = []
     for i, sl in enumerate(slots):
         exp_kw = imp_kw = 0.0
-        if sl.charge:
+        if sl.charge and not (exp[i] > 0 and sl.sched and not sl.free):
             kw = cfg.max_charge_kw
             if sl.sched and not sl.free and cfg.charge_mode == "spread":
                 kw = spread = spread_charge_kw(cfg, kwh / cap * 100, sl.frm, sl.finish_by, spread)
@@ -252,6 +333,12 @@ def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: l
             if rest_h > 0:
                 batt -= sl.load_kw / eff * rest_h / sl.hours
             mode = MODE_IOG if kwh < tgt - 0.05 else MODE_HOLD
+        elif buy and buy[i] is not None:
+            # bought in advance for an export: the house runs from grid and the battery rests
+            # (0) or grid-charges at up to buy[i] kW
+            batt = min(buy[i], (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
+            mode = MODE_CHARGE if batt > 0.05 else MODE_HOLD
+            imp_kw = sl.load_kw + batt / cfg.charge_eff
         else:
             load_b = sl.load_kw / eff
             want = exp[i]
@@ -273,65 +360,217 @@ def _simulate(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: l
     return rows
 
 
+def _import_price(inp: PlannerInputs, sl: _Slot) -> float | None:
+    """Import price (GBP/kWh) for a slot; past the published rates, the same time on an earlier day."""
+    if sl.import_gbp is not None:
+        return sl.import_gbp
+    for days in (1, 2):
+        p = _rate_at(inp.import_rates, sl.start - timedelta(days=days))
+        if p is not None:
+            return p
+    return None
+
+
+def _export_candidates(cfg: PlannerConfig, slots: list[_Slot]) -> list[int]:
+    """Slots an export may go in: ordinary slots before a charge window (so the energy is
+    replaced inside the horizon), and with ``night_cycle`` the window's own slots up to its
+    finish-early time."""
+    out = []
+    for i, sl in enumerate(slots):
+        if sl.export_p is None:
+            continue
+        if not (sl.charge or sl.saving or sl.iog_h > 0):
+            if sl.next_charge < len(slots):
+                out.append(i)
+        elif cfg.night_cycle and sl.sched and not sl.free and sl.end <= sl.finish_by:
+            out.append(i)
+    return out
+
+
+class _ExportSearch:
+    """Chooses exports that earn at least ``export_margin`` p/kWh more than keeping the energy.
+
+    Keeping it is worth whatever replaces it later in the simulated plan: a smaller recharge
+    in the window, house load not bought at peak, or nothing if a free-electricity session
+    refills the battery anyway. Every candidate is judged on the whole plan's value.
+
+    1. ``raise_exports``: best price first, each slot raised in 0.5 kW steps while the last
+       step still clears the margin. Unless ``export_peak_import``, a step may not cause
+       import outside the charge window, dispatches and free sessions.
+    2. ``buy_ahead`` (with ``export_peak_import``): where an export still stops at the floor,
+       buy for it in advance, no more than ``buy_ahead_h`` before its run of well-paid half
+       hours, nearest first: hold (house on grid, battery resting), then grid-charge in 2 kW
+       steps, as much as gives the most value over the margin.
+
+    Energy sold inside a charge window must be bought back by its finish-early time, as what's
+    left after the horizon isn't valued and the battery should sit full then (balancing).
+    """
+
+    STEP_KW = 0.5
+    BUY_STEP_KW = 2.0
+    SHORT_KWH = 0.3  # tolerance on buying back what's sold in a window
+
+    def __init__(self, cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], exp: list[float]) -> None:
+        self.cfg, self.inp, self.slots, self.exp = cfg, inp, slots, exp
+        self.buy: list[float | None] = [None] * len(slots)
+        self.margin = cfg.export_margin / 100
+        self.tgt_kwh = cfg.target_soc / 100 * cfg.capacity_kwh
+        known = [p for p in (_import_price(inp, sl) for sl in slots) if p is not None]
+        worst = max(known, default=0.0)
+        # free sessions cost nothing; an unpriced slot is assumed to cost the most seen
+        self.imp_p = [0.0 if sl.free else (_import_price(inp, sl) or worst) for sl in slots]
+        # each window's first slot by its buy-back slot, and how short of the target it already
+        # ends without exports in it (the spread charge can land a little under)
+        self.windows: dict[int, int] = {}
+        for i, sl in enumerate(slots):
+            if sl.buyback is not None:
+                self.windows.setdefault(sl.buyback, i)
+        rows0 = _simulate(cfg, inp, slots, [0.0 if sl.sched else x for sl, x in zip(slots, exp)], self.buy)
+        self.short0 = {b: max(0.0, self.tgt_kwh - rows0[b]["kwh"]) for b in self.windows}
+
+    def simulate(self) -> list[dict]:
+        return _simulate(self.cfg, self.inp, self.slots, self.exp, self.buy)
+
+    def value(self) -> tuple[float, float, float, float]:
+        """Value (GBP), export kWh, import kWh outside cheap periods, and the shortfall (kWh)
+        below the target at the buy-back slot of a window the plan exports in."""
+        rows = self.simulate()
+        v = ek_tot = peak = 0.0
+        for sl, r, ip in zip(self.slots, rows, self.imp_p):
+            ek, ik = r["exp_kw"] * sl.hours, r["imp_kw"] * sl.hours
+            ek_tot += ek
+            v += ek * ((sl.export_p or 0) / 100) - ik * ip
+            if not (sl.charge or sl.iog_h > 0):
+                peak += ik
+        short = 0.0
+        for b, a in self.windows.items():
+            if any(self.exp[i] > 0 for i in range(a, b + 1)):
+                short = max(short, self.tgt_kwh - rows[b]["kwh"] - self.short0[b])
+        return v, ek_tot, peak, short
+
+    def order(self, cands: list[int]) -> list[int]:
+        """Best price first; at equal prices the latest half hour (a later replan may yet cancel
+        it), but inside a charge window the earliest, to leave time to buy the energy back."""
+        sl = self.slots
+        return sorted(set(cands), key=lambda j: (-sl[j].export_p, j if sl[j].sched else -j))
+
+    def raise_exports(self, order: list[int]) -> None:
+        cfg, exp = self.cfg, self.exp
+        for j in order:
+            if exp[j] >= cfg.max_export_kw - 1e-6:
+                continue
+            levels = [exp[j]]
+            while levels[-1] < cfg.max_export_kw - 1e-6:
+                levels.append(min(cfg.max_export_kw, levels[-1] + self.STEP_KW))
+            cache: dict[int, tuple[float, float, float, float]] = {}
+
+            def at(i: int) -> tuple[float, float, float, float]:
+                if i not in cache:
+                    exp[j] = levels[i]
+                    cache[i] = self.value()
+                return cache[i]
+
+            def pays(i: int) -> bool:
+                (v0, e0, p0, _), (v1, e1, p1, short) = at(i - 1), at(i)
+                if not cfg.export_peak_import and p1 - p0 > 0.01:
+                    return False
+                if short > self.SHORT_KWH:
+                    return False
+                return e1 - e0 > 0.01 and v1 - v0 >= self.margin * (e1 - e0)
+
+            # each extra step is worth less than the last (the floor, dearer replacement), so bisect
+            lo, hi = 0, len(levels) - 1
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if pays(mid):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            exp[j] = levels[lo]
+
+    def buy_ahead(self, order: list[int], cands: list[int]) -> None:
+        cfg, slots, exp, buy = self.cfg, self.slots, self.exp, self.buy
+        ok = set(cands)
+        ahead = timedelta(hours=cfg.buy_ahead_h)
+        for j in order:
+            if slots[j].sched:
+                continue  # in a window, buying is just the charge
+            while self.simulate()[j]["exp_kw"] < cfg.max_export_kw - 0.05:  # held back by the floor
+                steps = self._buy_steps(j, ok, ahead)
+                if not steps:
+                    break
+                base = self.value()
+                saved, old = list(buy), exp[j]
+                exp[j] = cfg.max_export_kw
+                # a half hour bought may only top up another export or this slot's own load
+                # (which must sit above the floor too), so try ever more and keep the best amount
+                best, best_n = 0.0, 0
+                for n, (k, kw) in enumerate(steps, 1):
+                    buy[k] = kw
+                    v, e, _, short = self.value()
+                    if e - base[1] > 0.01 and short <= self.SHORT_KWH:
+                        score = v - base[0] - self.margin * (e - base[1])
+                        if score > best + 1e-4:
+                            best, best_n = score, n
+                buy[:] = saved
+                for k, kw in steps[:best_n]:
+                    buy[k] = kw
+                if best_n == 0:
+                    exp[j] = old
+                    break
+
+    def _buy_steps(self, j: int, ok: set[int], ahead: timedelta) -> list[tuple[int, float]]:
+        """Ways to buy in advance for the export at ``j``, nearest first: holds, then charge steps.
+        Never in a half hour paying about as much to export, and only within ``ahead`` of the
+        start of that run of well-paid half hours."""
+        cfg, slots, exp, buy = self.cfg, self.slots, self.exp, self.buy
+        dear = lambda k: (slots[k].export_p or 0) + cfg.export_margin >= slots[j].export_p
+        run = j
+        while run > 0 and not slots[run - 1].charge and dear(run - 1):
+            run -= 1
+        near = [
+            k
+            for k in range(run - 1, -1, -1)
+            if k in ok
+            and slots[k].next_charge == slots[j].next_charge
+            and exp[k] <= 0
+            and not dear(k)
+            and slots[k].start >= slots[run].start - ahead
+        ]
+        steps = [(k, 0.0) for k in near if buy[k] is None]
+        for k in near:
+            kw = max(buy[k] or 0.0, 0.0)
+            while kw < cfg.max_charge_kw - 1e-6:
+                kw = min(cfg.max_charge_kw, kw + self.BUY_STEP_KW)
+                steps.append((k, kw))
+        return steps
+
+
+def _choose_exports(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot]) -> tuple[list[float], list[float | None]]:
+    """Export kW wanted per slot, and what's bought in advance (None, 0 = hold, kW = grid charge)."""
+    sav_kw = cfg.saving_export_kw if cfg.saving_export_kw is not None else cfg.max_export_kw
+    exp = [sav_kw if sl.saving and not sl.charge else 0.0 for sl in slots]
+    search = _ExportSearch(cfg, inp, slots, exp)
+    cands = _export_candidates(cfg, slots)
+    if cands:
+        order = search.order(cands)
+        search.raise_exports(order)
+        if cfg.export_peak_import:
+            search.buy_ahead(order, cands)
+    return exp, search.buy
+
+
 def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
     """Run the planner and return a JSON-serialisable result."""
     slots = build_slots(cfg, inp)
+    exp, buy = _choose_exports(cfg, inp, slots)
+    rows = _simulate(cfg, inp, slots, exp, buy)
+    return _report(cfg, inp, slots, rows)
+
+
+def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: list[dict]) -> dict:
+    """The plan as published: per-slot forecast, per-day costs, blocks and headline figures."""
     cap = cfg.capacity_kwh
-    eff = cfg.discharge_eff
-    sav_kw = cfg.saving_export_kw if cfg.saving_export_kw is not None else cfg.max_export_kw
-    n = len(slots)
-    exp = [0.0] * n
-    for i, sl in enumerate(slots):
-        if sl.saving and not sl.charge:
-            exp[i] = sav_kw
-
-    reserve_pts = [i for i, sl in enumerate(slots) if sl.charge and (i == 0 or not slots[i - 1].charge)]
-    seg = 0
-    for r in reserve_pts:
-        if r == 0:
-            seg = 1
-            continue
-        res_soc = floor_at(cfg, slots[r].frm, inp.tz)
-        min_price = cfg.min_export_price
-        if slots[r].free and inp.free_session:
-            free_h = (inp.free_session[1] - inp.free_session[0]).total_seconds() / 3600
-            res_soc = max(res_soc, 100 - free_h * cfg.max_charge_kw / cap * 100)
-            if cfg.min_export_price_pre_free is not None:
-                min_price = cfg.min_export_price_pre_free
-        cands = [
-            j
-            for j in range(seg, r)
-            if not (slots[j].charge or slots[j].saving or slots[j].iog_h > 0)
-            and slots[j].export_p is not None
-            and slots[j].export_p >= min_price
-        ]
-        cands.sort(key=lambda j: -slots[j].export_p)  # stable, like JS sort
-        # With a day floor some best-priced slots can't use all they're given, so
-        # re-check and hand what's left to the next slots (single pass otherwise).
-        start_kwh = inp.soc / 100 * cap
-        for _pass in range(4 if cfg.day_reserve_soc is not None else 1):
-            rows = _simulate(cfg, inp, slots, exp)
-            surplus = rows[r - 1]["kwh"] - res_soc / 100 * cap
-            if surplus <= 0.05:
-                break
-            for j in cands:
-                if surplus <= 0.05:
-                    break
-                if exp[j] > 0:
-                    continue
-                if cfg.day_reserve_soc is not None:
-                    before = rows[j - 1]["kwh"] if j > 0 else start_kwh
-                    if before - slots[j].floor / 100 * cap <= 0.05:
-                        continue  # already at this slot's floor
-                kw = min(cfg.max_export_kw, surplus * eff / slots[j].hours)
-                exp[j] = kw
-                surplus -= kw * slots[j].hours / eff
-        seg = r
-        while seg < n and slots[seg].charge:
-            seg += 1
-
-    rows = _simulate(cfg, inp, slots, exp)
-
     forecast = []
     days: dict[str, dict[str, float]] = {}
     for sl, row in zip(slots, rows):
@@ -403,7 +642,7 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
         del b["_i"]
         b["kwh"] = _r(b["kwh"], 1)
 
-    first_res = next((r for r in reserve_pts if r > 0), None)
+    first_res = next((i for i in range(1, len(slots)) if slots[i].charge and not slots[i - 1].charge), None)
     soc_at_charge = forecast[first_res - 1]["soc"] if first_res is not None else forecast[-1]["soc"]
     nxt = blocks[0] if blocks else None
     all_rates = inp.export_rates
@@ -417,7 +656,7 @@ def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
         "capacity_kwh": _r(cap, 1),
         "charge_kw": _r(cfg.max_charge_kw, 2),
         "max_export_kw": cfg.max_export_kw,
-        "min_export_rate": cfg.min_export_price,
+        "export_margin": cfg.export_margin,
         "export_kwh_planned": _r(sum(r["exp_kw"] * s.hours for s, r in zip(slots, rows)), 1),
         "next_action": nxt["mode"] if nxt else MODE_SELF,
         "next_action_start": nxt["start"] if nxt else None,
@@ -469,6 +708,7 @@ __all__ = [
     "PlannerInputs",
     "charge_finish_by",
     "floor_at",
+    "offpeak_window",
     "spread_charge_kw",
     "Rate",
     "plan",

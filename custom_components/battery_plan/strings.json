@@ -55,6 +55,7 @@
               "schedule_duration_entity": "Inverter schedule duration",
               "schedule_soc_entity": "Inverter schedule target SOC",
               "consumed_ah_entity": "BMS consumed amp-hours",
+              "charge_window_from_rates": "Charge window from import rates",
               "charge_start": "Charge window start",
               "charge_hours": "Charge window length",
               "charge_mode": "Charge rate",
@@ -72,6 +73,7 @@
               "schedule_duration_entity": "Optional: the schedule's duration (minutes unless the entity says otherwise). Overrides the window length below.",
               "schedule_soc_entity": "Optional: the schedule's target SOC. Overrides the charge target.",
               "consumed_ah_entity": "Optional: battery monitor consumed Ah. Spread charging then sizes the current from the BMS capacity (consumed Ah ÷ (100 − SOC)), like the Node-RED spreader.",
+              "charge_window_from_rates": "Use the import rates' daily off-peak period as the charge window (e.g. 23:30-05:30 on Intelligent Octopus Go), ignoring dispatches. Overrides the schedule entities and the start and length below, which still apply when no off-peak period is found (e.g. Agile).",
               "charge_start": "Start of the cheap-rate grid-charge window.",
               "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
               "max_charge_kw": "Battery-side charge power at full rate.",
@@ -88,19 +90,23 @@
             "data": {
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
-              "min_export_price": "Minimum export price",
               "discharge_eff": "Discharge efficiency",
               "limited_export_kw": "Limited export power",
-              "min_export_price_pre_free": "Minimum export price before a free session",
+              "export_margin": "Export margin",
+              "export_peak_import": "Buy at peak to export more",
+              "buy_ahead_hours": "Buy in advance up to",
+              "night_cycle": "Buy, sell and buy back overnight",
               "export_tracking": "Track SOC when exporting"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
-              "min_export_price": "Only export in slots paying at least this.",
               "discharge_eff": "Battery to AC.",
               "limited_export_kw": "Used by the \"limited export\" override.",
-              "min_export_price_pre_free": "Optional: lower price accepted when emptying the battery ahead of a free-electricity session.",
+              "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
+              "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
+              "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
+              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
               "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
             }
           },
@@ -168,6 +174,9 @@
             "data": {
               "grid_setpoint_entity": "Grid setpoint entity",
               "charge_current_entity": "Charge current limit entity",
+              "charge_schedule_soc_entity": "Charge schedule SOC entity",
+              "charge_schedule_idle_soc": "Charge schedule parked SOC",
+              "charge_schedule_window": "Charge overnight with the charge schedule",
               "idle_setpoint_w": "Idle grid setpoint",
               "charge_setpoint_w": "Charging grid setpoint",
               "setpoint_deadband_w": "Setpoint deadband",
@@ -180,6 +189,9 @@
             "data_description": {
               "grid_setpoint_entity": "Optional: number entity for the grid setpoint (e.g. Victron ESS AC power setpoint). Adds a 'Grid setpoint control' switch.",
               "charge_current_entity": "Optional: number entity for the charge current limit (e.g. Victron DVCC max charge current). Adds a 'Charge current control' switch.",
+              "charge_schedule_soc_entity": "Optional: target SOC of a charge schedule left on all day (e.g. Victron ESS schedule 5). Written with the charge current: raised for IOG dispatches, free sessions and charges bought ahead of an export, parked otherwise. Turn off anything else that switches this schedule.",
+              "charge_schedule_idle_soc": "Target SOC when no charge is wanted; below the battery's SOC so the schedule has no effect.",
+              "charge_schedule_window": "Also raise the charge schedule for the overnight window (parked only while the plan exports in it), for setups without a separate overnight schedule. Needed for buy, sell and buy back.",
               "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
               "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
               "setpoint_deadband_w": "Changes smaller than this are not written.",
@@ -247,6 +259,7 @@
               "schedule_duration_entity": "Inverter schedule duration",
               "schedule_soc_entity": "Inverter schedule target SOC",
               "consumed_ah_entity": "BMS consumed amp-hours",
+              "charge_window_from_rates": "Charge window from import rates",
               "charge_start": "Charge window start",
               "charge_hours": "Charge window length",
               "charge_mode": "Charge rate",
@@ -264,6 +277,7 @@
               "schedule_duration_entity": "Optional: the schedule's duration (minutes unless the entity says otherwise). Overrides the window length below.",
               "schedule_soc_entity": "Optional: the schedule's target SOC. Overrides the charge target.",
               "consumed_ah_entity": "Optional: battery monitor consumed Ah. Spread charging then sizes the current from the BMS capacity (consumed Ah ÷ (100 − SOC)), like the Node-RED spreader.",
+              "charge_window_from_rates": "Use the import rates' daily off-peak period as the charge window (e.g. 23:30-05:30 on Intelligent Octopus Go), ignoring dispatches. Overrides the schedule entities and the start and length below, which still apply when no off-peak period is found (e.g. Agile).",
               "charge_start": "Start of the cheap-rate grid-charge window.",
               "charge_mode": "Full power, or spread over the window to finish shortly before it ends.",
               "max_charge_kw": "Battery-side charge power at full rate.",
@@ -280,19 +294,23 @@
             "data": {
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
-              "min_export_price": "Minimum export price",
               "discharge_eff": "Discharge efficiency",
               "limited_export_kw": "Limited export power",
-              "min_export_price_pre_free": "Minimum export price before a free session",
+              "export_margin": "Export margin",
+              "export_peak_import": "Buy at peak to export more",
+              "buy_ahead_hours": "Buy in advance up to",
+              "night_cycle": "Buy, sell and buy back overnight",
               "export_tracking": "Track SOC when exporting"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
-              "min_export_price": "Only export in slots paying at least this.",
               "discharge_eff": "Battery to AC.",
               "limited_export_kw": "Used by the \"limited export\" override.",
-              "min_export_price_pre_free": "Optional: lower price accepted when emptying the battery ahead of a free-electricity session.",
+              "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
+              "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
+              "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
+              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
               "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
             }
           },
@@ -360,6 +378,9 @@
             "data": {
               "grid_setpoint_entity": "Grid setpoint entity",
               "charge_current_entity": "Charge current limit entity",
+              "charge_schedule_soc_entity": "Charge schedule SOC entity",
+              "charge_schedule_idle_soc": "Charge schedule parked SOC",
+              "charge_schedule_window": "Charge overnight with the charge schedule",
               "idle_setpoint_w": "Idle grid setpoint",
               "charge_setpoint_w": "Charging grid setpoint",
               "setpoint_deadband_w": "Setpoint deadband",
@@ -372,6 +393,9 @@
             "data_description": {
               "grid_setpoint_entity": "Optional: number entity for the grid setpoint (e.g. Victron ESS AC power setpoint). Adds a 'Grid setpoint control' switch.",
               "charge_current_entity": "Optional: number entity for the charge current limit (e.g. Victron DVCC max charge current). Adds a 'Charge current control' switch.",
+              "charge_schedule_soc_entity": "Optional: target SOC of a charge schedule left on all day (e.g. Victron ESS schedule 5). Written with the charge current: raised for IOG dispatches, free sessions and charges bought ahead of an export, parked otherwise. Turn off anything else that switches this schedule.",
+              "charge_schedule_idle_soc": "Target SOC when no charge is wanted; below the battery's SOC so the schedule has no effect.",
+              "charge_schedule_window": "Also raise the charge schedule for the overnight window (parked only while the plan exports in it), for setups without a separate overnight schedule. Needed for buy, sell and buy back.",
               "idle_setpoint_w": "Setpoint when not exporting or charging (e.g. -50 W), and the fallback value.",
               "charge_setpoint_w": "Setpoint during charge, hold and IOG slots.",
               "setpoint_deadband_w": "Changes smaller than this are not written.",
@@ -460,6 +484,9 @@
       },
       "target_charge_current": {
         "name": "Target charge current"
+      },
+      "target_charge_soc": {
+        "name": "Target charge SOC"
       },
       "control_status": {
         "name": "Control status",

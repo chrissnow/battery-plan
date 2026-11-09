@@ -21,6 +21,7 @@ from .const import (
     CONF_CAPACITY_KWH,
     CONF_CHARGE_EFF,
     CONF_CHARGE_HOURS,
+    CONF_WINDOW_FROM_RATES,
     CONF_CHARGE_MODE,
     CONF_CHARGE_START,
     CONF_WEATHER_COOLING,
@@ -56,12 +57,14 @@ from .const import (
     CONF_MAX_CHARGE_KW,
     CONF_MAX_EXPORT_KW,
     CONF_MIN_CHARGE_KW,
-    CONF_MIN_EXPORT_PRICE,
     CONF_MIN_SOC,
     CONF_DAY_RESERVE_SOC,
     CONF_DAY_RESERVE_START,
     CONF_DAY_RESERVE_END,
-    CONF_MIN_EXPORT_PRICE_PRE_FREE,
+    CONF_EXPORT_MARGIN,
+    CONF_EXPORT_PEAK_IMPORT,
+    CONF_BUY_AHEAD_H,
+    CONF_NIGHT_CYCLE,
     CONF_RESERVE_SOC,
     CONF_SAVING_CALENDAR,
     CONF_SAVING_EXPORT_KW,
@@ -130,7 +133,8 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ---------- configuration ----------
     def schedule(self) -> dict[str, Any]:
-        """Charge window and target, from the inverter's schedule entities where set and valid.
+        """Charge window and target: the window from the import rates' off-peak period if that's
+        on and one is found, else the inverter's schedule entities where set and valid.
 
         Returns {"start": seconds after midnight, "duration": seconds, "target": %,
         "source": {...}} falling back to the settings for anything unavailable.
@@ -163,6 +167,12 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             n = _float(st.state)
             if n is not None and 10 <= n <= 100:
                 target, src["target"] = n, eid
+        if o.get(CONF_WINDOW_FROM_RATES):
+            w = P.offpeak_window(
+                self.rates(o.get(CONF_IMPORT_RATES, [])), self.dispatches(), dt_util.get_default_time_zone()
+            )
+            if w is not None:
+                (start, dur), src["start"], src["duration"] = w, "import rates", "import rates"
         return {"start": start, "duration": dur, "target": target, "source": src}
 
     def bms_capacity_ah(self, soc: float | None) -> float | None:
@@ -192,7 +202,10 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             day_reserve_soc=_float(o.get(CONF_DAY_RESERVE_SOC)),
             day_reserve_start=_secs(o.get(CONF_DAY_RESERVE_START), "05:25:00"),
             day_reserve_end=_secs(o.get(CONF_DAY_RESERVE_END), "22:25:00"),
-            min_export_price_pre_free=_float(o.get(CONF_MIN_EXPORT_PRICE_PRE_FREE)),
+            export_margin=_float(o.get(CONF_EXPORT_MARGIN), 5.0),
+            export_peak_import=bool(o.get(CONF_EXPORT_PEAK_IMPORT, False)),
+            buy_ahead_h=float(o.get(CONF_BUY_AHEAD_H, 3)),
+            night_cycle=bool(o.get(CONF_NIGHT_CYCLE, False)),
             charge_start=sch["start"],
             charge_duration=sch["duration"],
             charge_mode=o[CONF_CHARGE_MODE],
@@ -205,7 +218,6 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             long_balance_min=float(o[CONF_LONG_BALANCE_MIN]),
             max_export_kw=float(o[CONF_MAX_EXPORT_KW]),
             saving_export_kw=_float(o.get(CONF_SAVING_EXPORT_KW)),
-            min_export_price=float(o[CONF_MIN_EXPORT_PRICE]),
             discharge_eff=float(o[CONF_DISCHARGE_EFF]),
             charge_eff=float(o[CONF_CHARGE_EFF]),
             dispatch_charges_battery=bool(o[CONF_DISPATCH_CHARGES]),

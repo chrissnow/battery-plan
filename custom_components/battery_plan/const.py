@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -41,6 +41,7 @@ CONF_SCHEDULE_SOC_ENTITY = "schedule_soc_entity"
 CONF_CONSUMED_AH_ENTITY = "consumed_ah_entity"
 CONF_CHARGE_START = "charge_start"
 CONF_CHARGE_HOURS = "charge_hours"
+CONF_WINDOW_FROM_RATES = "charge_window_from_rates"
 CONF_CHARGE_MODE = "charge_mode"
 CONF_MAX_CHARGE_KW = "max_charge_kw"
 CONF_MIN_CHARGE_KW = "min_charge_kw"
@@ -54,8 +55,11 @@ CONF_CHARGE_EFF = "charge_eff"
 # Export
 CONF_MAX_EXPORT_KW = "max_export_kw"
 CONF_SAVING_EXPORT_KW = "saving_export_kw"
-CONF_MIN_EXPORT_PRICE = "min_export_price"
-CONF_MIN_EXPORT_PRICE_PRE_FREE = "min_export_price_pre_free"
+CONF_EXPORT_MARGIN = "export_margin"
+CONF_EXPORT_PEAK_IMPORT = "export_peak_import"
+CONF_BUY_AHEAD_H = "buy_ahead_hours"
+CONF_NIGHT_CYCLE = "night_cycle"
+CONF_CHARGE_SOC_WINDOW = "charge_schedule_window"
 CONF_LIMITED_EXPORT_KW = "limited_export_kw"
 CONF_EXPORT_TRACKING = "export_tracking"
 CONF_DISCHARGE_EFF = "discharge_eff"
@@ -83,6 +87,8 @@ CONF_FREE_CALENDAR = "free_calendar"
 # Control (optional, off by default)
 CONF_SETPOINT_ENTITY = "grid_setpoint_entity"
 CONF_CURRENT_ENTITY = "charge_current_entity"
+CONF_CHARGE_SOC_ENTITY = "charge_schedule_soc_entity"
+CONF_CHARGE_SOC_IDLE = "charge_schedule_idle_soc"
 CONF_IDLE_SETPOINT_W = "idle_setpoint_w"
 CONF_CHARGE_SETPOINT_W = "charge_setpoint_w"
 CONF_SETPOINT_DEADBAND_W = "setpoint_deadband_w"
@@ -114,10 +120,15 @@ DEFAULTS: dict = {
     CONF_DAY_RESERVE_END: "22:25:00",
     CONF_LIMITED_EXPORT_KW: 4.0,
     CONF_EXPORT_TRACKING: True,
+    CONF_EXPORT_PEAK_IMPORT: False,
+    CONF_BUY_AHEAD_H: 3,
+    CONF_NIGHT_CYCLE: False,
+    CONF_CHARGE_SOC_WINDOW: False,
     CONF_EV_ALLOW_INVERT: False,
     CONF_MIN_SOC: 5,
     CONF_CHARGE_START: "23:30:00",
     CONF_CHARGE_HOURS: 6,
+    CONF_WINDOW_FROM_RATES: False,
     CONF_CHARGE_MODE: "max",
     CONF_MAX_CHARGE_KW: 5.0,
     CONF_MIN_CHARGE_KW: 0.5,
@@ -128,7 +139,7 @@ DEFAULTS: dict = {
     CONF_LONG_BALANCE_MIN: 60,
     CONF_CHARGE_EFF: 0.93,
     CONF_MAX_EXPORT_KW: 5.0,
-    CONF_MIN_EXPORT_PRICE: 12.5,
+    CONF_EXPORT_MARGIN: 5,
     CONF_DISCHARGE_EFF: 0.9,
     CONF_LOAD_DAYS: 7,
     CONF_LOAD_KW: 0.8,
@@ -143,6 +154,7 @@ DEFAULTS: dict = {
     CONF_SETPOINT_DEADBAND_W: 100,
     CONF_BATTERY_VOLTAGE: 51.2,
     CONF_STALE_MIN: 15,
+    CONF_CHARGE_SOC_IDLE: 0,
 }
 
 SECTIONS: dict[str, list[str]] = {
@@ -162,6 +174,7 @@ SECTIONS: dict[str, list[str]] = {
         CONF_SCHEDULE_DURATION_ENTITY,
         CONF_SCHEDULE_SOC_ENTITY,
         CONF_CONSUMED_AH_ENTITY,
+        CONF_WINDOW_FROM_RATES,
         CONF_CHARGE_START,
         CONF_CHARGE_HOURS,
         CONF_CHARGE_MODE,
@@ -178,8 +191,10 @@ SECTIONS: dict[str, list[str]] = {
         CONF_MAX_EXPORT_KW,
         CONF_SAVING_EXPORT_KW,
         CONF_LIMITED_EXPORT_KW,
-        CONF_MIN_EXPORT_PRICE,
-        CONF_MIN_EXPORT_PRICE_PRE_FREE,
+        CONF_EXPORT_MARGIN,
+        CONF_EXPORT_PEAK_IMPORT,
+        CONF_BUY_AHEAD_H,
+        CONF_NIGHT_CYCLE,
         CONF_EXPORT_TRACKING,
         CONF_DISCHARGE_EFF,
     ],
@@ -211,6 +226,9 @@ SECTIONS: dict[str, list[str]] = {
     SEC_CONTROL: [
         CONF_SETPOINT_ENTITY,
         CONF_CURRENT_ENTITY,
+        CONF_CHARGE_SOC_ENTITY,
+        CONF_CHARGE_SOC_IDLE,
+        CONF_CHARGE_SOC_WINDOW,
         CONF_IDLE_SETPOINT_W,
         CONF_CHARGE_SETPOINT_W,
         CONF_SETPOINT_DEADBAND_W,
