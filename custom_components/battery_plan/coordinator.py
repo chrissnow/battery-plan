@@ -484,6 +484,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dispatches=disp,
             saving_session=await self._calendar_window(self.opts.get(CONF_SAVING_CALENDAR), now),
             free_session=await self._calendar_window(self.opts.get(CONF_FREE_CALENDAR), now),
+            ready=self.ready_time(now),
         )
         result = await self.hass.async_add_executor_job(P.plan, cfg, inp)
         result["load_profile_kw"] = inp.load_kw

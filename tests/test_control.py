@@ -232,3 +232,39 @@ async def test_charge_schedule_soc_overnight(hass, octopus_states, freezer) -> N
     sched = [c.data["value"] for c in calls if c.data["entity_id"] == SCHED]
     assert sched and sched[-1] == 100  # no backstop schedule: keep the overnight charge going
 
+
+async def _free_session_setup(hass, freezer, soc, at):
+    """Octoplus free electricity 13:00-16:00 on 4 Nov, from a mocked calendar."""
+    from homeassistant.core import SupportsResponse
+
+    start, end = datetime(2026, 11, 4, 13, 0, tzinfo=timezone.utc), datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)
+    hass.states.async_set("calendar.free", "off")
+    async_mock_service(hass, "calendar", "get_events", supports_response=SupportsResponse.ONLY,
+                       response={"calendar.free": {"events": [{"start": start.isoformat(), "end": end.isoformat(), "summary": "Free"}]}})
+    hass.states.async_set("sensor.batt_soc", str(soc), {"device_class": "battery", "unit_of_measurement": "%"})
+    hass.states.async_set(SCHED, "0", {"min": 0, "max": 100})
+    await setup(hass, freezer, control_opts(free_calendar="calendar.free", charge_schedule_soc_entity=SCHED), at=at)
+
+
+async def test_free_session_ahead(hass, octopus_states, freezer) -> None:
+    """Before a free session: export to make room (the refill is free), charge schedule still parked."""
+    await _free_session_setup(hass, freezer, 80, datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc))
+    a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+    assert a["free_session"][0].startswith("2026-11-04T13:00")
+    before = [f for f in a["forecast"] if f["t"] <= "2026-11-04T13:00:00.000Z"]
+    assert any(f["mode"] == "export" for f in before)  # 17p export, refilled for free: make room
+    session = [f for f in a["forecast"] if "2026-11-04T13:00:00.000Z" < f["t"] <= "2026-11-04T16:00:00.000Z"]
+    assert session[0]["mode"] == "charge" and all(f["ip"] == 0 for f in session)
+    assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == 0  # not yet
+
+
+async def test_free_session_charging(hass, octopus_states, freezer) -> None:
+    """In a free session: charge schedule raised, current spread to finish 15 min early, charging setpoint."""
+    await _free_session_setup(hass, freezer, 40, datetime(2026, 11, 4, 13, 30, tzinfo=timezone.utc))
+    assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == 100
+    st = hass.states.get("sensor.battery_plan_control_status").attributes
+    assert st["top_up_finish_by"].startswith("2026-11-04T15:45")
+    kw = 0.6 * 61.7 / 2.25 + 0.26  # 60% to go in 2 h 15 min, plus make-up
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(kw * 1000 / 51.2, rel=0.03)
+    assert float(val(hass, "sensor.battery_plan_target_grid_setpoint")) == 0, (st["reason"], st["mode"])
+

@@ -18,7 +18,7 @@ Model, per half-hour slot over the horizon:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 import math
 
@@ -90,6 +90,9 @@ class PlannerInputs:
     saving_session: tuple[datetime, datetime] | None = None
     free_session: tuple[datetime, datetime] | None = None
     spread_kw: float | None = None  # charge rate already in force, if known
+    # car ready time (Intelligent Octopus target): the dispatch slot just before it is the one
+    # that doesn't move, so it's the only dispatch exports may count on to refill the battery
+    ready: datetime | None = None
     # weather-dependent load, per half-hour slot start (epoch):
     # (load adjustment kW, heating kW, cooling kW, forecast temperature)
     weather: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
@@ -546,11 +549,26 @@ class _ExportSearch:
         return steps
 
 
-def _choose_exports(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot]) -> tuple[list[float], list[float | None]]:
-    """Export kW wanted per slot, and what's bought in advance (None, 0 = hold, kW = grid charge)."""
+def _firm_dispatches(inp: PlannerInputs) -> list[tuple[datetime, datetime]]:
+    """Dispatches exports may count on: only the half hour before the ready time.
+
+    Other dispatch times move (the hours before ready stay about the same, but may come
+    before an export) or vanish, so the export search plans as if they weren't there."""
+    if inp.ready is None:
+        return []
+    a, b = inp.ready - HALF, inp.ready
+    return [(max(s, a), min(e, b)) for s, e in inp.dispatches if s < b and e > a]
+
+
+def _choose_exports(
+    cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], search_slots: list[_Slot]
+) -> tuple[list[float], list[float | None]]:
+    """Export kW wanted per slot, and what's bought in advance (None, 0 = hold, kW = grid charge).
+
+    ``search_slots`` are the slots as the search sees them: only firm dispatches."""
     sav_kw = cfg.saving_export_kw if cfg.saving_export_kw is not None else cfg.max_export_kw
     exp = [sav_kw if sl.saving and not sl.charge else 0.0 for sl in slots]
-    search = _ExportSearch(cfg, inp, slots, exp)
+    search = _ExportSearch(cfg, inp, search_slots, exp)
     cands = _export_candidates(cfg, slots)
     if cands:
         order = search.order(cands)
@@ -563,7 +581,9 @@ def _choose_exports(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot]) 
 def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
     """Run the planner and return a JSON-serialisable result."""
     slots = build_slots(cfg, inp)
-    exp, buy = _choose_exports(cfg, inp, slots)
+    firm = _firm_dispatches(inp) if cfg.dispatch_charges_battery else []
+    search_slots = slots if firm == list(inp.dispatches) else build_slots(cfg, replace(inp, dispatches=firm))
+    exp, buy = _choose_exports(cfg, inp, slots, search_slots)
     rows = _simulate(cfg, inp, slots, exp, buy)
     return _report(cfg, inp, slots, rows)
 
@@ -586,7 +606,7 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
                 "ek": _r(ek, 3),
                 "mode": row["mode"],
                 "rate": None if sl.export_p is None else _r(sl.export_p, 2),
-                "ip": None if sl.import_gbp is None else _r(sl.import_gbp * 100, 2),
+                "ip": 0.0 if sl.free else None if sl.import_gbp is None else _r(sl.import_gbp * 100, 2),
                 "ld": _r(sl.load_kw, 2),
                 "fl": sl.floor,
             }
@@ -607,9 +627,9 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
             d["weather_kwh"] = d.get("weather_kwh", 0.0) + (sl.heat_kw + sl.cool_kw) * sl.hours
         d["import_kwh"] += ik
         d["export_kwh"] += ek
-        if sl.import_gbp is None and ik > 0:
+        if sl.import_gbp is None and ik > 0 and not sl.free:
             d["priced"] = False
-        d["import_cost"] += ik * (sl.import_gbp or 0)
+        d["import_cost"] += 0.0 if sl.free else ik * (sl.import_gbp or 0)  # free sessions cost nothing
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
         for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh"):

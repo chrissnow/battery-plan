@@ -31,7 +31,7 @@ def _rates(vals):
 def _plan(exp, soc=50, load=2.0, now=None, imp=None, **kw):
     """Plan from 12:00 on 4 Nov (unless ``now``) with IOG import and ``exp`` (GBP/kWh per half hour from 00:00)."""
     cfg = {**BASE, **kw}
-    sessions = {k: cfg.pop(k) for k in ("dispatches", "free_session", "saving_session") if k in cfg}
+    sessions = {k: cfg.pop(k) for k in ("dispatches", "free_session", "saving_session", "ready") if k in cfg}
     inp = P.PlannerInputs(now=now or D0 + timedelta(hours=12), tz=TZ, soc=soc, load_kw=[load] * 24,
                           export_rates=_rates(exp), import_rates=_rates(imp or IOG * 3), **sessions)
     return P.plan(P.PlannerConfig(**cfg), inp)
@@ -85,6 +85,14 @@ def test_free_session_empties_first():
     res = _plan(flat, free_session=free, **kw)
     assert res["export_kwh_planned"] > 10
     assert any(f["mode"] == "export" for f in res["forecast"] if f["t"] <= "2026-11-04T13:00:00.000Z")
+    # in the session it charges at full power, and that energy costs nothing
+    session = [f for f in res["forecast"] if "2026-11-04T13:00:00.000Z" < f["t"] <= "2026-11-04T16:00:00.000Z"]
+    assert session[0]["mode"] == "charge" and session[0]["kw"] == pytest.approx(10, abs=0.01)
+    assert soc_at(res, "16:00") > soc_at(res, "13:00") + 30
+    assert all(f["ip"] == 0 for f in session) and sum(f["ik"] for f in session) > 15
+    day = res["days"]["2026-11-04"]
+    assert day["import_cost"] == pytest.approx(
+        sum(f["ik"] * f["ip"] / 100 for f in res["forecast"] if f["t"] <= "2026-11-05T00:00:00.000Z"), abs=0.01)
 
 
 def test_export_margin():
@@ -156,7 +164,7 @@ def test_export_before_dispatch():
     disp = [(D0 + timedelta(hours=7, minutes=30), D0 + timedelta(hours=8))]
     imp = [0.066 if (i < 11 or i >= 47 or i == 15) else 0.3426 for i in range(48)] * 2  # dispatch priced off-peak
     exp = [0.25 if 11 <= i < 15 else 0.10 for i in range(96)]  # 25p only before the dispatch
-    kw = dict(soc=100, load=1.0, now=D0 + timedelta(hours=5, minutes=30), imp=imp, dispatches=disp)
+    kw = dict(soc=100, load=1.0, now=D0 + timedelta(hours=5, minutes=30), imp=imp, dispatches=disp, ready=D0 + timedelta(hours=8))
     before = lambda r: sum(f["ek"] for f in r["forecast"] if f["t"] <= "2026-11-04T07:30:00.000Z")
     assert before(_plan(exp, export_margin=40, **kw)) == 0
     # 25p export vs 6.6p refill (7.9p after losses): exports ahead of the dispatch, which refills it
@@ -220,4 +228,23 @@ def test_offpeak_window():
     assert w(_rates([0.20 + 0.01 * ((i * 7) % 5) for i in range(48)])) is None
     assert w(_rates([0.25] * 48)) is None
     assert w([]) is None
+
+
+def test_only_the_final_dispatch_is_firm():
+    """Exports count only on the dispatch slot before the ready time: others may move earlier or vanish."""
+    imp = [0.066 if (i < 11 or i >= 47 or i in (12, 15)) else 0.3426 for i in range(48)] * 2  # dispatches off-peak
+    exp = [0.25 if 11 <= i < 15 else 0.10 for i in range(96)]
+    final = (D0 + timedelta(hours=7, minutes=30), D0 + timedelta(hours=8))
+    extra = (D0 + timedelta(hours=6), D0 + timedelta(hours=6, minutes=30))
+    kw = dict(soc=100, load=3.0, now=D0 + timedelta(hours=5, minutes=30), imp=imp)
+    before = lambda r: sum(f["ek"] for f in r["forecast"] if f["t"] <= "2026-11-04T07:30:00.000Z")
+    only_final = _plan(exp, dispatches=[final], ready=final[1], **kw)
+    both = _plan(exp, dispatches=[extra, final], ready=final[1], **kw)
+    assert before(only_final) > 1
+    # the 06:00 dispatch isn't counted on: no more export than the final slot alone refills
+    assert before(both) == pytest.approx(before(only_final), abs=0.3)
+    # but the plan still charges in it
+    assert next(f for f in both["forecast"] if f["t"] == "2026-11-04T06:30:00.000Z")["mode"] in ("iog", "hold")
+    # without a ready time no dispatch is firm: nothing exported ahead of them
+    assert before(_plan(exp, dispatches=[extra, final], **kw)) == 0
 
