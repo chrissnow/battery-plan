@@ -66,6 +66,7 @@ from .const import (
     CONF_LOAD_EXCLUDE,
     CONF_LOAD_KW,
     CONF_SETPOINT_DEADBAND_W,
+    CONF_CURRENT_DEADBAND_A,
     CONF_SETPOINT_ENTITY,
     CONF_SOC_ENTITY,
     CONF_STALE_MIN,
@@ -345,9 +346,10 @@ class Controller:
                 return export(-self.custom_w / 1000, "override: custom")
             return float(self.custom_w), "override: custom"
         if mode == "export" and o.get(CONF_EXPORT_TRACKING, True):
-            end = dt_util.parse_datetime(slot["t"]) or c.now
+            last = self._export_run_end(c, slot)
+            end = dt_util.parse_datetime(last["t"]) or c.now
             hrs = max((end - c.now).total_seconds() / 3600, 5 / 60)
-            target = max(float(slot["soc"]), floor)
+            target = max(float(last["soc"]), floor)
             load = self._live_load_kw(slot)
             kw = (soc - target) / 100 * cfg.capacity_kwh / hrs * cfg.discharge_eff - load
             return export(kw, f"export to {target:.0f}% by {dt_util.as_local(end):%H:%M}, load {load:.1f} kW:")
@@ -360,6 +362,22 @@ class Controller:
         if mode in ("charge", "hold", "iog"):
             return float(o[CONF_CHARGE_SETPOINT_W]), f"{mode} slot"
         return c.idle, "house on battery" if mode == "self" else f"{mode} slot"
+
+    @staticmethod
+    def _export_run_end(c: _Ctx, slot: dict) -> dict:
+        """The last half hour of the export run ``slot`` starts: following export half hours at
+        about the same planned power. Tracking to its end, not each half hour's, avoids tapering
+        off at every half-hour boundary and jumping back (and the writes that go with it), while
+        a run's smaller last half hour (often a lower price) keeps its own target."""
+        fc = (c.data or {}).get("forecast") or []
+        try:
+            i = fc.index(slot)
+        except ValueError:
+            return slot
+        kw = float(slot.get("exp") or 0)
+        while i + 1 < len(fc) and fc[i + 1]["mode"] == "export" and abs(float(fc[i + 1].get("exp") or 0) - kw) <= 0.5:
+            i += 1
+        return fc[i]
 
     def _topup_finish(self, now: datetime, data: dict | None, cfg: Any) -> datetime | None:
         """Inside an IOG dispatch (if they charge the battery) outside the charge window: when to
@@ -427,7 +445,7 @@ class Controller:
             await self._write(o.get(CONF_SETPOINT_ENTITY), self.setpoint_w, float(o[CONF_SETPOINT_DEADBAND_W]))
             await self._write_ev(not self.ev_inhibit)
         if self.current_on:
-            await self._write(o.get(CONF_CURRENT_ENTITY), self.current_a, 1.0)
+            await self._write(o.get(CONF_CURRENT_ENTITY), self.current_a, float(o.get(CONF_CURRENT_DEADBAND_A, 10)))
             await self._write(o.get(CONF_CHARGE_SOC_ENTITY), self.charge_soc, 1.0)
         if self.enabled:
             await self._heartbeat("on")

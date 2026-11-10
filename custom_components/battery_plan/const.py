@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -94,6 +94,7 @@ CONF_CHARGE_SOC_IDLE = "charge_schedule_idle_soc"
 CONF_IDLE_SETPOINT_W = "idle_setpoint_w"
 CONF_CHARGE_SETPOINT_W = "charge_setpoint_w"
 CONF_SETPOINT_DEADBAND_W = "setpoint_deadband_w"
+CONF_CURRENT_DEADBAND_A = "current_deadband_a"
 CONF_BATTERY_VOLTAGE = "battery_voltage"
 CONF_STALE_MIN = "stale_minutes"
 CONF_HEARTBEAT_TOPIC = "heartbeat_topic"
@@ -155,6 +156,7 @@ DEFAULTS: dict = {
     CONF_IDLE_SETPOINT_W: -50,
     CONF_CHARGE_SETPOINT_W: 0,
     CONF_SETPOINT_DEADBAND_W: 100,
+    CONF_CURRENT_DEADBAND_A: 10,
     CONF_BATTERY_VOLTAGE: 51.2,
     CONF_STALE_MIN: 15,
     CONF_CHARGE_SOC_IDLE: 0,
@@ -237,6 +239,7 @@ SECTIONS: dict[str, list[str]] = {
         CONF_IDLE_SETPOINT_W,
         CONF_CHARGE_SETPOINT_W,
         CONF_SETPOINT_DEADBAND_W,
+        CONF_CURRENT_DEADBAND_A,
         CONF_BATTERY_VOLTAGE,
         CONF_STALE_MIN,
         CONF_HEARTBEAT_TOPIC,

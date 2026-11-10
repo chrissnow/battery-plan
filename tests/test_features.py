@@ -1,8 +1,10 @@
 """Overrides, SOC-tracking export and EV inhibit (planner logic is in test_planner.py)."""
+from datetime import datetime, timezone
+
 import pytest
 from pytest_homeassistant_custom_component.common import async_mock_service
 
-from .test_control import control_opts, run, setup, val
+from .test_control import CUR, control_opts, run, setup, val
 
 
 async def test_overrides(hass, octopus_states, freezer) -> None:
@@ -33,6 +35,43 @@ async def test_tracking_export(hass, octopus_states, freezer) -> None:
     kw = (24.1 - max(plan["soc"], 20)) / 100 * 61.7 / 0.5 * 0.9 - 1.5
     assert float(val(hass, "sensor.battery_plan_target_grid_setpoint")) == pytest.approx(-kw * 1000, abs=60)
     assert "by" in hass.states.get("sensor.battery_plan_control_status").attributes["reason"]
+
+
+def test_export_run_end() -> None:
+    """Tracking aims for the end of the run of export half hours at about the same power,
+    not each half hour's end; a smaller last half hour keeps its own target."""
+    from types import SimpleNamespace
+    from custom_components.battery_plan.control import Controller
+
+    f = lambda t, mode, exp, soc: {"t": t, "mode": mode, "exp": exp, "soc": soc}
+    fc = [f("17:00", "export", 11, 66), f("17:30", "export", 11, 54), f("18:00", "export", 10.8, 42),
+          f("18:30", "export", 11, 31), f("19:00", "export", 3.9, 25), f("19:30", "self", 0, 23)]
+    c = SimpleNamespace(data={"forecast": fc})
+    assert Controller._export_run_end(c, fc[0])["t"] == "18:30"
+    assert Controller._export_run_end(c, fc[4])["t"] == "19:00"
+    assert Controller._export_run_end(SimpleNamespace(data={"forecast": []}), fc[0]) is fc[0]
+
+
+async def test_current_deadband(hass, octopus_states, freezer) -> None:
+    """Charge current changes smaller than the deadband (default 10 A) aren't written."""
+    from custom_components.battery_plan.const import DEFAULTS
+
+    assert DEFAULTS["current_deadband_a"] == 10
+    _, calls = await setup(hass, freezer, control_opts(current_deadband_a=10),
+                           at=datetime(2026, 11, 4, 0, 0, tzinfo=timezone.utc))
+    await hass.services.async_call("switch", "turn_on", {"entity_id": "switch.battery_plan_charge_current_control"}, blocking=True)
+    await hass.async_block_till_done()
+    cur = [c for c in calls if c.data["entity_id"] == CUR]
+    assert cur, "spread current written on turning on"
+    first = cur[-1].data["value"]
+    hass.states.async_set(CUR, str(first), {"min": 0, "max": 344})
+    n = len(cur)
+    # nudge the SOC: the spread moves by a few amps, inside the deadband
+    hass.states.async_set("sensor.batt_soc", "25", {"device_class": "battery", "unit_of_measurement": "%"})
+    await run(hass, freezer)
+    target = float(val(hass, "sensor.battery_plan_target_charge_current"))
+    assert 0.5 < abs(target - first) < 10  # the target moved ...
+    assert len([c for c in calls if c.data["entity_id"] == CUR]) == n  # ... but wasn't written
 
 
 async def test_ev_inhibit(hass, octopus_states, freezer) -> None:
