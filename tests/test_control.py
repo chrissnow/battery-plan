@@ -169,6 +169,22 @@ async def test_spread_during_iog_dispatch(hass, octopus_states, freezer) -> None
     assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(343.8, abs=0.5)
 
 
+async def test_confirmed_half_hour_counts_whole(hass, octopus_states, freezer) -> None:
+    """A dispatch planned to stop at 07:40, but the 07:30 half hour is confirmed (started_dispatches):
+    billed off-peak to 08:00, so the top-up runs to 07:45 (08:00 less 15 min) and the plan charges in it."""
+    t = lambda h, m: datetime(2026, 11, 4, h, m, tzinfo=timezone.utc)
+    hass.states.async_set("binary_sensor.dispatching", "on", {
+        "planned_dispatches": [{"start": t(7, 30), "end": t(7, 40), "source": "SMART"}],
+        "started_dispatches": [{"start": t(7, 30), "end": t(8, 0)}]})
+    hass.states.async_set("sensor.batt_soc", "90", {"device_class": "battery", "unit_of_measurement": "%"})
+    await setup(hass, freezer, control_opts(), at=t(7, 35))
+    a = hass.states.get("sensor.battery_plan_control_status").attributes
+    assert a["top_up_finish_by"].startswith("2026-11-04T07:45")
+    assert a["mode"] == "iog"
+    plan = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+    assert ["2026-11-04T07:30:00.000Z", "2026-11-04T08:00:00.000Z"] in plan["iog_dispatches"]
+
+
 async def test_charge_window_from_inverter_schedule(hass, octopus_states, freezer) -> None:
     """Window and target come from the inverter's schedule entities; capacity from the BMS."""
     hass.states.async_set("time.ess_start", "00:00:00")

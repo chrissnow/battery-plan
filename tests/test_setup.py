@@ -334,6 +334,10 @@ async def test_costs_from_energy_dashboard(hass, recorder_mock, octopus_states, 
         hass.states.async_set(sid, "0", {"unit_of_measurement": unit, "state_class": "total_increasing"})
         async_import_statistics(hass, meta, rows)
     await async_wait_recording_done(hass)
+    # yesterday 12:00-13:00 UTC was a confirmed dispatch (two half hours): billed off-peak (6.6p),
+    # though the dashboard costed it at 10p
+    hass.states.async_set("binary_sensor.dispatching", "off", {"planned_dispatches": [], "started_dispatches": [
+        {"start": start.replace(hour=12), "end": start.replace(hour=13)}]})
     opts = flat(SETTINGS)
     opts.pop("grid_power_entity")  # not needed with the Energy dashboard
     await setup(hass, freezer, opts)
@@ -343,10 +347,12 @@ async def test_costs_from_energy_dashboard(hass, recorder_mock, octopus_states, 
     # today: 00:00 -> 22:00 complete hours = 22 h
     assert float(imp.state) == pytest.approx(22 * 0.10, abs=0.11)
     assert imp.attributes["import_kwh"] == pytest.approx(22, abs=1.01)
+    assert imp.attributes["dispatch_reprice"] == 0
     y = hass.states.get("sensor.battery_plan_net_yesterday")
     assert y.attributes["date"] == "2026-11-02"
     assert y.attributes["import_kwh"] == pytest.approx(24, abs=0.01)
-    assert float(y.state) == pytest.approx(24 * 0.10 - 24 * 0.10 - 0.507455, abs=0.01)
+    assert y.attributes["dispatch_reprice"] == pytest.approx(0.10 - 0.066, abs=0.006)  # shown to 2 dp
+    assert float(y.state) == pytest.approx(24 * 0.10 - (24 * 0.10 - 0.034) - 0.507455, abs=0.01)
 
 
 async def test_charge_window_from_rates(hass, recorder_mock, octopus_states, freezer) -> None:

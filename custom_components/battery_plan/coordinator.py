@@ -251,15 +251,37 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return [out[k] for k in sorted(out)]
 
     def dispatches(self) -> list[tuple[datetime, datetime]]:
+        """IOG dispatches: planned ones, plus the half hours already confirmed (the Octopus
+        integration's ``started_dispatches``). A confirmed half hour is billed off-peak to its
+        end even if the dispatch stops part way, so it counts whole."""
         eid = self.opts.get(CONF_DISPATCHING_ENTITY)
         st = self.hass.states.get(eid) if eid else None
         if st is None:
             return []
         out = []
-        for d in st.attributes.get("planned_dispatches") or []:
+        for key in ("planned_dispatches", "started_dispatches"):
+            for d in st.attributes.get(key) or []:
+                s, e = _as_dt(d.get("start")), _as_dt(d.get("end"))
+                if s and e and e > s:
+                    out.append((s, e))
+        return P.merge_windows(out)
+
+    def confirmed_slots(self) -> list[datetime]:
+        """Half hours (UTC starts) the Octopus integration has confirmed as dispatches: billed
+        off-peak to their end, whatever the live rate showed at the time."""
+        eid = self.opts.get(CONF_DISPATCHING_ENTITY)
+        st = self.hass.states.get(eid) if eid else None
+        if st is None:
+            return []
+        out: set[datetime] = set()
+        for d in st.attributes.get("started_dispatches") or []:
             s, e = _as_dt(d.get("start")), _as_dt(d.get("end"))
-            if s and e and e > s:
-                out.append((s, e))
+            if not (s and e):
+                continue
+            t = datetime.fromtimestamp(s.timestamp() // 1800 * 1800, timezone.utc)
+            while t < e:
+                out.add(t)
+                t += timedelta(minutes=30)
         return sorted(out)
 
     def ready_time(self, now: datetime) -> datetime | None:
@@ -841,6 +863,9 @@ class CostTracker:
         now = dt_util.now()
         today0 = dt_util.start_of_local_day(now)
         yday0 = dt_util.start_of_local_day(today0 - timedelta(hours=12))
+        confirmed = self.coordinator.confirmed_slots()
+        imp = self._imp or self.coordinator.rates(self.coordinator.opts.get(CONF_IMPORT_RATES, []))
+        offpeak = min((r.price for r in imp), default=None)
 
         def change(ids: list[str], start: datetime, end: datetime, unit: dict | None) -> float:
             tot = 0.0
@@ -857,11 +882,34 @@ class CostTracker:
                 d["import_cost"] = change(stats["import_cost"], start, end, None)
                 d["export_kwh"] = change(stats["export"], start, end, {"energy": "kWh"})
                 d["export_value"] = change(stats["export_value"], start, end, None)
+                d["dispatch_reprice"] = self._reprice(confirmed, offpeak, start, end, change, stats)
+                d["import_cost"] -= d["dispatch_reprice"]
                 out.append(d)
             return out[0], out[1]
 
         self.today, self.yesterday = await get_instance(self.hass).async_add_executor_job(collect)
         self._notify()
+
+    @staticmethod
+    def _reprice(confirmed: list[datetime], offpeak: float | None, start: datetime, end: datetime,
+                 change: Any, stats: dict) -> float:
+        """How much the Energy dashboard over-charged confirmed dispatch half hours (GBP).
+
+        It prices each moment at the rate showing then, so the minutes of a confirmed half hour
+        before the dispatch was known went in at peak; Octopus bills the whole half hour off-peak."""
+        if offpeak is None:
+            return 0.0
+        over = 0.0
+        # runs of consecutive half hours, one query each
+        blocks = P.merge_windows([(t, t + timedelta(minutes=30)) for t in confirmed])
+        for s, e in blocks:
+            s, e = max(s, start), min(e, end)
+            if e <= s:
+                continue
+            kwh = change(stats["import"], s, e, {"energy": "kWh"})
+            cost = change(stats["import_cost"], s, e, None)
+            over += max(0.0, cost - kwh * offpeak)
+        return round(over, 4)
 
     def set_rates(self, imp: list[P.Rate], exp: list[P.Rate]) -> None:
         if imp:

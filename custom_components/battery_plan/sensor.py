@@ -332,6 +332,8 @@ class CostSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
             "export_kwh": round(d["export_kwh"], 2),
             "export_value": round(d["export_value"], 2),
             "unpriced_kwh": round(d["unpriced_kwh"], 2),
+            # taken off import_cost: confirmed dispatch half hours billed off-peak in full
+            "dispatch_reprice": round(d.get("dispatch_reprice", 0.0), 2),
             "standing_charge": self.coordinator.standing_charge(),
             "source": self.coordinator.costs.source,
         }
