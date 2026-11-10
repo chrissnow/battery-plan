@@ -43,6 +43,8 @@ from .const import (
     CONF_FINISH_EARLY_FULL_MIN,
     CONF_FINISH_EARLY_MIN,
     CONF_FREE_CALENDAR,
+    CONF_FREE_CAP_KWH,
+    CONF_POWER_UP_CALENDAR,
     CONF_GRID_POWER_ENTITY,
     CONF_GRID_POWER_INVERT,
     CONF_USE_ENERGY_COSTS,
@@ -221,6 +223,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             discharge_eff=float(o[CONF_DISCHARGE_EFF]),
             charge_eff=float(o[CONF_CHARGE_EFF]),
             dispatch_charges_battery=bool(o[CONF_DISPATCH_CHARGES]),
+            free_cap_kwh=_float(o.get(CONF_FREE_CAP_KWH), 16.0) or 0.0,
         )
 
     def watched_entities(self) -> list[str]:
@@ -277,8 +280,13 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return ready
 
     async def _calendar_window(self, eid: str | None, now: datetime) -> tuple[datetime, datetime] | None:
+        wins = await self._calendar_windows(eid, now)
+        return wins[0] if wins else None
+
+    async def _calendar_windows(self, eid: str | None, now: datetime) -> list[tuple[datetime, datetime]]:
+        """Calendar events not yet over in the next 36 h, earliest first."""
         if not eid or self.hass.states.get(eid) is None:
-            return None
+            return []
         try:
             resp = await self.hass.services.async_call(
                 "calendar",
@@ -289,14 +297,40 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except HomeAssistantError as err:
             _LOGGER.debug("calendar %s: %s", eid, err)
-            return None
+            return []
         evs = ((resp or {}).get(eid) or {}).get("events") or []
         wins = []
         for ev in evs:
             s, e = _as_dt(ev.get("start")), _as_dt(ev.get("end"))
             if s and e and e > now:
                 wins.append((s, e))
-        return min(wins) if wins else None
+        return sorted(wins)
+
+    async def _grid_import_kwh(self, start: datetime, end: datetime) -> float:
+        """Grid import (kWh) between two times: the Energy dashboard's grid meters, else the
+        grid power sensor's 5-minute means. 0 if neither is available."""
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistic_during_period
+
+        if end <= start:
+            return 0.0
+        stats = await energy_grid_stats(self.hass)
+        try:
+            if stats and stats["import"]:
+                def change() -> float:
+                    return sum(
+                        float(statistic_during_period(self.hass, start, end, sid, {"change"}, {"energy": "kWh"}).get("change") or 0.0)
+                        for sid in stats["import"]
+                    )
+
+                return max(0.0, await get_instance(self.hass).async_add_executor_job(change))
+            if eid := self.opts.get(CONF_GRID_POWER_ENTITY):
+                rows = (await self._stats({eid}, start, end, "5minute")).get(eid, [])
+                sign = -1 if self.opts.get(CONF_GRID_POWER_INVERT) else 1
+                return sum(max(0.0, sign * float(r["mean"])) * 5 / 60 for r in rows if r.get("mean") is not None)
+        except Exception as err:  # noqa: BLE001 - recorder missing or query failed
+            _LOGGER.debug("Battery Plan could not read grid import: %s", err)
+        return 0.0
 
     async def _stats(self, ids: set[str], start: datetime, end: datetime, period: str) -> dict:
         from homeassistant.components.recorder import get_instance
@@ -362,7 +396,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         - Intelligent Octopus dispatches outside the charge window (the battery
           or other chargers top up then, and some of that is metered as load)
-        - Octoplus free-electricity and saving sessions
+        - Octoplus free-electricity, Power Up and saving sessions
         - outside the charge window, times our Battery action sensor saw the
           battery charging from the grid
         """
@@ -372,7 +406,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for key in (CONF_DISPATCHING_ENTITY,):
             if eid := self.opts.get(key):
                 sources[eid] = {"on"}
-        for key in (CONF_FREE_CALENDAR, CONF_SAVING_CALENDAR):
+        for key in (CONF_FREE_CALENDAR, CONF_POWER_UP_CALENDAR, CONF_SAVING_CALENDAR):
             if eid := self.opts.get(key):
                 sources[eid] = {"on"}
         from homeassistant.helpers import entity_registry as er
@@ -389,7 +423,7 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass, start, end, list(sources), significant_changes_only=False, no_attributes=True
             )
         )
-        sessions = {self.opts.get(CONF_FREE_CALENDAR), self.opts.get(CONF_SAVING_CALENDAR)} - {None}
+        sessions = {self.opts.get(k) for k in (CONF_FREE_CALENDAR, CONF_POWER_UP_CALENDAR, CONF_SAVING_CALENDAR)} - {None}
         masked: set[int] = set()
         for eid, rows in states.items():
             on = sources.get(eid, set())
@@ -473,6 +507,10 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         disp = self.dispatches()
         load = await self._load_profile(now)
         weather = await self._weather_inputs(now, cfg.horizon_slots)
+        frees = await self._calendar_windows(self.opts.get(CONF_FREE_CALENDAR), now)
+        power_ups = await self._calendar_windows(self.opts.get(CONF_POWER_UP_CALENDAR), now)
+        current = next((w for w in frees if w[0] <= now < w[1]), None)  # capped: count what it's used
+        used = await self._grid_import_kwh(current[0], now) if current and cfg.free_cap_kwh > 0 else 0.0
         inp = P.PlannerInputs(
             now=now,
             tz=dt_util.get_default_time_zone(),
@@ -483,7 +521,9 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             import_rates=imp,
             dispatches=disp,
             saving_session=await self._calendar_window(self.opts.get(CONF_SAVING_CALENDAR), now),
-            free_session=await self._calendar_window(self.opts.get(CONF_FREE_CALENDAR), now),
+            free_sessions=frees,
+            free_used_kwh=used,
+            power_up_sessions=power_ups,
             ready=self.ready_time(now),
         )
         result = await self.hass.async_add_executor_job(P.plan, cfg, inp)

@@ -8,7 +8,10 @@ Model, per half-hour slot over the horizon:
   the window ends (like a DVCC charge-current spreader). The house runs from grid.
 - Inside an Intelligent Octopus dispatch (outside the window) the battery
   grid-charges at full power, if ``dispatch_charges_battery``.
-- Inside a free-electricity (power-up) session the battery charges at full power.
+- Inside a free-electricity (power-up) session the battery charges at full power, until
+  the session's import reaches ``free_cap_kwh`` (house load counts too). Past the cap it
+  carries on only where import is off-peak anyway (e.g. an IOG dispatch for the car);
+  at peak the session ends there and the import over the cap is paid at the rate.
 - Otherwise the house runs from the battery, down to ``min_soc``, then from grid.
   Saving sessions export at ``saving_export_kw``.
 - Exports are chosen by one rule: export a kWh when it earns at least ``export_margin``
@@ -64,6 +67,7 @@ class PlannerConfig:
     discharge_eff: float = 0.9
     charge_eff: float = 0.93
     dispatch_charges_battery: bool = True
+    free_cap_kwh: float = 16.0  # free import per free-electricity session (0 = no cap)
     horizon_slots: int = 72
 
 
@@ -88,7 +92,10 @@ class PlannerInputs:
     import_rates: list[Rate] = field(default_factory=list)
     dispatches: list[tuple[datetime, datetime]] = field(default_factory=list)
     saving_session: tuple[datetime, datetime] | None = None
-    free_session: tuple[datetime, datetime] | None = None
+    free_session: tuple[datetime, datetime] | None = None  # one session (or use free_sessions)
+    free_sessions: list[tuple[datetime, datetime]] = field(default_factory=list)
+    free_used_kwh: float = 0.0  # grid import so far in the (capped) free session in progress
+    power_up_sessions: list[tuple[datetime, datetime]] = field(default_factory=list)  # uncapped
     spread_kw: float | None = None  # charge rate already in force, if known
     # car ready time (Intelligent Octopus target): the dispatch slot just before it is the one
     # that doesn't move, so it's the only dispatch exports may count on to refill the battery
@@ -119,6 +126,8 @@ class _Slot:
     temp: float | None = None
     next_charge: int = 0  # index of the first charge slot at or after this one (len(slots) if none)
     buyback: int | None = None  # in a charge window: the slot ending at its finish-early time
+    free_id: int | None = None  # which free session (they each have their own cap)
+    cheap: bool = False  # import at the lowest rate seen (off-peak, or a dispatch priced so)
 
 
 def _rate_at(rates: list[Rate], t: datetime) -> float | None:
@@ -240,11 +249,26 @@ def spread_charge_kw(
     return min(cfg.max_charge_kw, max(cfg.min_charge_kw, spread))
 
 
+def free_sessions(cfg: PlannerConfig, inp: PlannerInputs) -> list[tuple[datetime, datetime, float]]:
+    """Free sessions not yet over, earliest first: (start, end, free import cap kWh).
+
+    Free-electricity sessions are capped at ``free_cap_kwh`` each; Power Ups aren't."""
+    now = inp.now.astimezone(timezone.utc)
+    cap = cfg.free_cap_kwh if cfg.free_cap_kwh > 0 else math.inf
+    wins = list(inp.free_sessions) or ([inp.free_session] if inp.free_session else [])
+    # the Octopus integration lists the capped weekend hours in its Power Up calendar too:
+    # one with the same times as a free session is that session, so it keeps the cap
+    same = {(s, e) for s, e in wins}
+    out = [(s, e, cap) for s, e in wins] + [(s, e, math.inf) for s, e in inp.power_up_sessions if (s, e) not in same]
+    return sorted(w for w in out if w[1] > now)
+
+
 def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
     now = inp.now.astimezone(timezone.utc)
     epoch = now.timestamp()
     start0 = datetime.fromtimestamp(math.floor(epoch / 1800) * 1800, timezone.utc)
-    free = inp.free_session if inp.free_session and inp.free_session[1] > now else None
+    frees = free_sessions(cfg, inp)
+    low = min((r.price for r in inp.import_rates), default=None)
     saving = inp.saving_session if inp.saving_session and inp.saving_session[1] > now else None
     disp = list(inp.dispatches) if cfg.dispatch_charges_battery else []
     slots: list[_Slot] = []
@@ -255,7 +279,11 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
         local = s.astimezone(inp.tz)
         finish_by = charge_finish_by(cfg, s, inp.tz)
         in_sched = finish_by is not None
-        in_free = _overlaps(s, e, free)
+        # overlapping sessions (a Power Up during a free session): the one with the larger cap
+        hits = [k for k, (ws, we, _) in enumerate(frees) if _overlaps(s, e, (ws, we))]
+        free_id = max(hits, key=lambda k: frees[k][2]) if hits else None
+        in_free = free_id is not None
+        imp_gbp = _rate_at(inp.import_rates, s)
         iog_h = 0.0
         if not in_sched:
             for ws, we in disp:
@@ -282,7 +310,9 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 temp=inp.weather[int(s.timestamp())][3] if int(s.timestamp()) in inp.weather else None,
                 floor=floor_at(cfg, frm, inp.tz),
                 export_p=None if exp_gbp is None else exp_gbp * 100,
-                import_gbp=_rate_at(inp.import_rates, s),
+                import_gbp=imp_gbp,
+                free_id=free_id,
+                cheap=iog_h > 0 or (imp_gbp is not None and low is not None and imp_gbp <= low + 0.001),
             )
         )
     nxt = len(slots)
@@ -318,16 +348,31 @@ def _simulate(
     tgt = cfg.target_soc / 100 * cap
     eff = cfg.discharge_eff
     spread = inp.spread_kw
+    # free import left per session; the one in progress has used some already
+    now = inp.now.astimezone(timezone.utc)
+    frees = free_sessions(cfg, inp)
+    left: dict[int, float] = {}
+    for k, (fs, _, fcap) in enumerate(frees):
+        left[k] = max(0.0, fcap - (inp.free_used_kwh if fs <= now else 0.0))
     rows = []
     for i, sl in enumerate(slots):
-        exp_kw = imp_kw = 0.0
-        if sl.charge and not (exp[i] > 0 and sl.sched and not sl.free):
+        exp_kw = imp_kw = free_kw = 0.0
+        # a free session charges while it has free import left, or past that where import is off-peak
+        # (less than the house load's worth left at peak: the battery runs the house instead)
+        free_now = sl.free_id is not None and (sl.cheap or left[sl.free_id] > max(0.05, sl.load_kw * sl.hours))
+        if (sl.sched or free_now) and not (exp[i] > 0 and sl.sched and not free_now):
             kw = cfg.max_charge_kw
-            if sl.sched and not sl.free and cfg.charge_mode == "spread":
+            if sl.sched and not free_now and cfg.charge_mode == "spread":
                 kw = spread = spread_charge_kw(cfg, kwh / cap * 100, sl.frm, sl.finish_by, spread)
             batt = min(kw, (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
+            if free_now and not sl.cheap and not sl.sched:
+                # at peak: charge only with what's left of the free import after the house load
+                batt = min(batt, max(0.0, (left[sl.free_id] / sl.hours - sl.load_kw) * cfg.charge_eff))
             mode = MODE_CHARGE if batt > 0 else MODE_HOLD
             imp_kw = batt / cfg.charge_eff + sl.load_kw
+            if free_now:
+                free_kw = min(imp_kw, left[sl.free_id] / sl.hours)
+                left[sl.free_id] -= free_kw * sl.hours
         elif sl.iog_h > 0:
             avail = max(0.0, tgt - kwh)
             batt = min(cfg.max_charge_kw * sl.iog_h, avail) / sl.hours
@@ -359,7 +404,8 @@ def _simulate(
                 exp_kw = 0.0
                 imp_kw = max(0.0, sl.load_kw + batt * eff)
         kwh += batt * sl.hours
-        rows.append({"kwh": kwh, "batt": batt, "mode": mode, "exp_kw": exp_kw, "imp_kw": imp_kw})
+        rows.append({"kwh": kwh, "batt": batt, "mode": mode, "exp_kw": exp_kw, "imp_kw": imp_kw,
+                     "free_kw": free_kw, "free": free_now})
     return rows
 
 
@@ -420,8 +466,8 @@ class _ExportSearch:
         self.tgt_kwh = cfg.target_soc / 100 * cfg.capacity_kwh
         known = [p for p in (_import_price(inp, sl) for sl in slots) if p is not None]
         worst = max(known, default=0.0)
-        # free sessions cost nothing; an unpriced slot is assumed to cost the most seen
-        self.imp_p = [0.0 if sl.free else (_import_price(inp, sl) or worst) for sl in slots]
+        # an unpriced slot is assumed to cost the most seen (free-session import is netted off per row)
+        self.imp_p = [_import_price(inp, sl) or worst for sl in slots]
         # each window's first slot by its buy-back slot, and how short of the target it already
         # ends without exports in it (the spread charge can land a little under)
         self.windows: dict[int, int] = {}
@@ -440,10 +486,10 @@ class _ExportSearch:
         rows = self.simulate()
         v = ek_tot = peak = 0.0
         for sl, r, ip in zip(self.slots, rows, self.imp_p):
-            ek, ik = r["exp_kw"] * sl.hours, r["imp_kw"] * sl.hours
+            ek, ik, paid = r["exp_kw"] * sl.hours, r["imp_kw"] * sl.hours, (r["imp_kw"] - r["free_kw"]) * sl.hours
             ek_tot += ek
-            v += ek * ((sl.export_p or 0) / 100) - ik * ip
-            if not (sl.charge or sl.iog_h > 0):
+            v += ek * ((sl.export_p or 0) / 100) - paid * ip
+            if not (sl.sched or sl.iog_h > 0 or r["free"]):
                 peak += ik
         short = 0.0
         for b, a in self.windows.items():
@@ -596,6 +642,14 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
     for sl, row in zip(slots, rows):
         ik = row["imp_kw"] * sl.hours
         ek = row["exp_kw"] * sl.hours
+        paid = ik - row["free_kw"] * sl.hours  # free-session import is credited afterwards
+        # import price paid on average in the slot: 0 while a free session covers it all
+        if sl.import_gbp is None:
+            ip = 0.0 if row["free"] and paid < 1e-6 else None
+        elif ik > 1e-9:
+            ip = _r(sl.import_gbp * 100 * paid / ik, 2)
+        else:
+            ip = 0.0 if row["free"] else _r(sl.import_gbp * 100, 2)
         forecast.append(
             {
                 "t": _iso(sl.end),
@@ -606,7 +660,7 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
                 "ek": _r(ek, 3),
                 "mode": row["mode"],
                 "rate": None if sl.export_p is None else _r(sl.export_p, 2),
-                "ip": 0.0 if sl.free else None if sl.import_gbp is None else _r(sl.import_gbp * 100, 2),
+                "ip": ip,
                 "ld": _r(sl.load_kw, 2),
                 "fl": sl.floor,
             }
@@ -627,9 +681,9 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
             d["weather_kwh"] = d.get("weather_kwh", 0.0) + (sl.heat_kw + sl.cool_kw) * sl.hours
         d["import_kwh"] += ik
         d["export_kwh"] += ek
-        if sl.import_gbp is None and ik > 0 and not sl.free:
+        if sl.import_gbp is None and paid > 1e-6:
             d["priced"] = False
-        d["import_cost"] += 0.0 if sl.free else ik * (sl.import_gbp or 0)  # free sessions cost nothing
+        d["import_cost"] += paid * (sl.import_gbp or 0)
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
         for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh"):
@@ -662,6 +716,21 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         del b["_i"]
         b["kwh"] = _r(b["kwh"], 1)
 
+    sessions = []
+    for k, (fs, fe, fcap) in enumerate(free_sessions(cfg, inp)):
+        own = [(sl, r) for sl, r in zip(slots, rows) if sl.free_id == k]
+        on = [sl for sl, r in own if r["free"]]
+        sessions.append({
+            "start": _iso(fs),
+            "end": _iso(fe),
+            "kind": "power_up" if math.isinf(fcap) and (fs, fe) in inp.power_up_sessions else "free",
+            "cap_kwh": None if math.isinf(fcap) else fcap,
+            # when the plan stops treating it as free (the cap runs out at peak), else its end
+            "until": _iso(min(fe, on[-1].end)) if on else _iso(fs),
+            "free_kwh": _r(sum(r["free_kw"] * sl.hours for sl, r in own), 2),
+            "used_kwh": _r(inp.free_used_kwh, 2) if fs <= inp.now else 0.0,
+        })
+
     first_res = next((i for i in range(1, len(slots)) if slots[i].charge and not slots[i - 1].charge), None)
     soc_at_charge = forecast[first_res - 1]["soc"] if first_res is not None else forecast[-1]["soc"]
     nxt = blocks[0] if blocks else None
@@ -682,7 +751,9 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         "next_action_start": nxt["start"] if nxt else None,
         "next_action_end": nxt["end"] if nxt else None,
         "iog_dispatches": [[_iso(a), _iso(b)] for a, b in inp.dispatches],
-        "free_session": [_iso(x) for x in inp.free_session] if inp.free_session else None,
+        "free_session": [sessions[0]["start"], sessions[0]["end"]] if sessions else None,
+        "free_sessions": sessions,
+        "free_cap_kwh": cfg.free_cap_kwh,
         "saving_session": [_iso(x) for x in inp.saving_session] if inp.saving_session else None,
         "rates_until": _iso(max(r.end for r in all_rates)) if all_rates else None,
         "days": days,

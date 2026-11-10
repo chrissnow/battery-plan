@@ -7,11 +7,13 @@ Every 30 s, and whenever the plan updates, the controller works out:
   charge setpoint in charge/hold/IOG slots; otherwise the idle setpoint. An
   override select (hold, max/limited export, saving, zero, custom) replaces the plan;
 - a charge current limit (A): the spread rate inside the charge window and, outside
-  it, inside an IOG dispatch / free session (finishing the finish-early minutes
-  before it ends), the planned rate in a charge bought ahead of an export, else max;
+  it, inside an IOG dispatch (finishing the finish-early minutes before it ends), the
+  planned rate in a free session (capped free import) or a charge bought ahead of an
+  export, else max;
 - a charge schedule target SOC (e.g. Victron ESS schedule 5, left on all day): raised
   to start a scheduled charge (so DC chargers that follow ESS schedules join in) in an
-  IOG dispatch / free session and in a charge bought ahead of an export, else parked
+  IOG dispatch, and in a free session or a charge bought ahead of an export (to the
+  plan's SOC at the end of that charge), else parked
   below the SOC. The overnight window is left to the inverter's own schedules, unless
   "charge overnight with the charge schedule" is on: then it is raised in the window
   too, except in half hours the plan exports in (buy, sell and buy back);
@@ -104,7 +106,7 @@ class _Ctx:
     max_a: float
     park: float  # charge schedule SOC when no charge is wanted
     window_end: datetime | None  # in the charge window: when to finish
-    topup: datetime | None  # in a dispatch / free session outside it: when to finish
+    topup: datetime | None  # in a dispatch outside it: when to finish
 
     @property
     def finish(self) -> datetime | None:
@@ -259,7 +261,7 @@ class Controller:
         self.floor = floor_at(c.cfg, now, dt_util.get_default_time_zone())
         self.charge_soc = self._charge_schedule_soc(c, slot)
         if self.mode == "charge" and c.finish is None:
-            # bought ahead of an export: at the planned rate
+            # free session or bought ahead of an export: at the planned rate
             kw = max(c.cfg.min_charge_kw, float(slot.get("kw") or 0))
             self.current_a = round(min(c.max_a, kw * 1000 / c.volts), 1)
         self.setpoint_w, self.reason = self._setpoint(c, slot)
@@ -277,8 +279,8 @@ class Controller:
         return slot, "no plan for now"
 
     def _charge_current(self, c: _Ctx) -> float:
-        """Charge current limit (A): the spread rate inside the window or a dispatch / free
-        session (finishing the finish-early minutes before it ends), else the maximum."""
+        """Charge current limit (A): the spread rate inside the window or a dispatch (finishing
+        the finish-early minutes before it ends), else the maximum."""
         cfg = c.cfg
         if c.soc is None or c.finish is None or cfg.charge_mode != "spread":
             self._spread = self._topup_spread = None
@@ -299,7 +301,7 @@ class Controller:
         """Target SOC for the charge schedule: raised to charge, else parked below the SOC."""
         cfg, park = c.cfg, c.park
         if slot is not None and slot["mode"] == "charge" and c.finish is None:
-            # bought ahead of an export: to the plan's SOC at the end of this charge run
+            # free session or bought ahead of an export: to the plan's SOC at the end of this charge run
             fc = c.data.get("forecast") or []
             i, peak = fc.index(slot), slot["soc"]
             while i < len(fc) and fc[i]["mode"] == "charge":
@@ -307,7 +309,7 @@ class Controller:
                 i += 1
             return max(park, min(cfg.target_soc, float(math.ceil(peak))))
         if c.topup is not None:
-            return max(park, cfg.target_soc)  # dispatch / free session: charge as the schedule would
+            return max(park, cfg.target_soc)  # dispatch: charge as the schedule would
         if c.window_end is not None and c.o.get(CONF_CHARGE_SOC_WINDOW):
             if slot is not None and slot["mode"] in ("export", "saving"):
                 return park  # buy, sell and buy back: stop the scheduled charge while exporting
@@ -360,14 +362,15 @@ class Controller:
         return c.idle, "house on battery" if mode == "self" else f"{mode} slot"
 
     def _topup_finish(self, now: datetime, data: dict | None, cfg: Any) -> datetime | None:
-        """Inside an IOG dispatch (if they charge the battery) or a free session outside the
-        charge window: when to finish, i.e. the end of that block less the finish-early minutes."""
+        """Inside an IOG dispatch (if they charge the battery) outside the charge window: when to
+        finish, i.e. the end of that block less the finish-early minutes.
+
+        Free sessions aren't spread: they have a cap on free import, so the plan says how much
+        to charge in them (its "charge" slots, followed like a charge bought ahead)."""
         if not data:
             return None
         spans: list[tuple[datetime, datetime]] = []
         raw = list(data.get("iog_dispatches") or []) if cfg.dispatch_charges_battery else []
-        if data.get("free_session"):
-            raw.append(data["free_session"])
         for s_, e_ in raw:
             s, e = dt_util.parse_datetime(s_), dt_util.parse_datetime(e_)
             if s and e and e > s:

@@ -31,7 +31,7 @@ def _rates(vals):
 def _plan(exp, soc=50, load=2.0, now=None, imp=None, **kw):
     """Plan from 12:00 on 4 Nov (unless ``now``) with IOG import and ``exp`` (GBP/kWh per half hour from 00:00)."""
     cfg = {**BASE, **kw}
-    sessions = {k: cfg.pop(k) for k in ("dispatches", "free_session", "saving_session", "ready") if k in cfg}
+    sessions = {k: cfg.pop(k) for k in ("dispatches", "free_session", "free_sessions", "free_used_kwh", "power_up_sessions", "saving_session", "ready") if k in cfg}
     inp = P.PlannerInputs(now=now or D0 + timedelta(hours=12), tz=TZ, soc=soc, load_kw=[load] * 24,
                           export_rates=_rates(exp), import_rates=_rates(imp or IOG * 3), **sessions)
     return P.plan(P.PlannerConfig(**cfg), inp)
@@ -82,7 +82,7 @@ def test_free_session_empties_first():
     assert _plan(flat, **kw)["export_kwh_planned"] == 0
     # ... but a free-electricity session refills it for nothing: empty the battery ahead of it
     free = (D0 + timedelta(hours=13), D0 + timedelta(hours=16))
-    res = _plan(flat, free_session=free, **kw)
+    res = _plan(flat, free_session=free, free_cap_kwh=0, **kw)  # no cap
     assert res["export_kwh_planned"] > 10
     assert any(f["mode"] == "export" for f in res["forecast"] if f["t"] <= "2026-11-04T13:00:00.000Z")
     # in the session it charges at full power, and that energy costs nothing
@@ -93,6 +93,90 @@ def test_free_session_empties_first():
     day = res["days"]["2026-11-04"]
     assert day["import_cost"] == pytest.approx(
         sum(f["ik"] * f["ip"] / 100 for f in res["forecast"] if f["t"] <= "2026-11-05T00:00:00.000Z"), abs=0.01)
+
+
+def _session(res, a="13:00", b="16:00"):
+    return [f for f in res["forecast"] if f"2026-11-04T{a}:00.000Z" < f["t"] <= f"2026-11-04T{b}:00.000Z"]
+
+
+def test_free_session_cap_at_peak():
+    """At peak a session's free import stops at the cap (16 kWh, house load included)."""
+    free = (D0 + timedelta(hours=13), D0 + timedelta(hours=16))
+    res = _plan([0.10] * 96, soc=20, load=1.0, now=D0 + timedelta(hours=8), free_session=free)
+    s = _session(res)
+    assert sum(f["ik"] for f in s if f["ip"] == 0) == pytest.approx(16, abs=0.05)
+    assert s[0]["mode"] == "charge" and s[0]["kw"] == pytest.approx(10, abs=0.01)
+    # 16 kWh = 1.5 h of 10 kW + 1 kW house, then the battery runs the house again
+    assert [f["mode"] for f in s] == ["charge", "charge", "charge", "self", "self", "self"]
+    assert all(f["ik"] == 0 for f in s[3:])
+    assert soc_at(res, "16:00") < soc_at(res, "14:30")
+    sess = res["free_sessions"][0]
+    assert sess["until"].startswith("2026-11-04T14:30") and sess["free_kwh"] == pytest.approx(16, abs=0.05)
+    # import already used in a session in progress counts against it
+    mid = _plan([0.10] * 96, soc=20, load=1.0, now=D0 + timedelta(hours=13, minutes=30), free_session=free, free_used_kwh=10)
+    # 13:30-14:00 at 10 kW takes 5.9 kWh; the 0.1 kWh left is less than the house uses, so it stops
+    assert [f["mode"] for f in _session(mid, "13:30")][:2] == ["charge", "self"]
+    assert mid["free_sessions"][0]["free_kwh"] == pytest.approx(5.88, abs=0.01)
+    assert mid["free_sessions"][0]["used_kwh"] == 10
+    # past the cap, import is paid at the rate it's billed at
+    over = _plan([0.10] * 96, soc=20, load=1.0, now=D0 + timedelta(hours=8), free_session=free, free_cap_kwh=4)
+    s = _session(over)
+    assert s[0]["mode"] == "charge" and s[0]["ik"] == pytest.approx(4, abs=0.01) and s[0]["ip"] == 0
+    assert s[1]["mode"] == "self" and s[1]["ik"] == 0
+
+
+def test_free_session_cap_off_peak():
+    """Off-peak (an IOG dispatch for the car, priced off-peak) it carries on past the cap."""
+    free = (D0 + timedelta(hours=13), D0 + timedelta(hours=16))
+    imp = [0.066 if (i < 11 or i >= 47 or 26 <= i < 32) else 0.3426 for i in range(48)] * 3
+    disp = [(D0 + timedelta(hours=13), D0 + timedelta(hours=16))]
+    res = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), imp=imp, dispatches=disp,
+                free_session=free, free_cap_kwh=4)
+    s = _session(res)
+    assert all(f["mode"] == "charge" for f in s)
+    assert s[0]["ip"] < 6.5 and s[1]["ip"] == pytest.approx(6.6, abs=0.01)  # paid off-peak past the cap
+    assert res["free_sessions"][0]["until"].startswith("2026-11-04T16:00")
+    day = res["days"]["2026-11-04"]
+    assert day["import_cost"] == pytest.approx(
+        sum(f["ik"] * f["ip"] / 100 for f in res["forecast"] if f["t"] <= "2026-11-05T00:00:00.000Z"), abs=0.01)
+
+
+def test_free_sessions_each_have_a_cap():
+    """Two sessions in a day (12:00-13:00, 14:00-15:00): 16 kWh each."""
+    wins = [(D0 + timedelta(hours=12), D0 + timedelta(hours=13)), (D0 + timedelta(hours=14), D0 + timedelta(hours=15))]
+    res = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), free_sessions=wins, free_cap_kwh=7)
+    assert [s["free_kwh"] for s in res["free_sessions"]] == pytest.approx([7, 7], abs=0.05)
+    assert res["free_session"][0].startswith("2026-11-04T12:00")
+    # back to back (12:00-13:00, 13:00-14:00): still one cap per event (hour), nothing lost at 13:00
+    b2b = [(D0 + timedelta(hours=12), D0 + timedelta(hours=13)), (D0 + timedelta(hours=13), D0 + timedelta(hours=14))]
+    res = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), free_sessions=b2b, free_cap_kwh=7)
+    assert [s["free_kwh"] for s in res["free_sessions"]] == pytest.approx([7, 7], abs=0.05)
+    assert all(f["mode"] == "charge" and f["ip"] == 0 for f in _session(res, "12:00", "14:00"))
+    # in the second hour, the import used so far counts from 13:00 (the coordinator measures it per event)
+    mid = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=13, minutes=10), free_sessions=b2b,
+                free_cap_kwh=7, free_used_kwh=2)
+    assert mid["free_sessions"][0]["free_kwh"] == pytest.approx(5, abs=0.05)
+
+
+def test_power_up_has_no_cap():
+    """Power Ups are free with no cap; free electricity sessions keep theirs."""
+    pu = [(D0 + timedelta(hours=13), D0 + timedelta(hours=16))]
+    res = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), power_up_sessions=pu)
+    s = _session(res)
+    assert all(f["mode"] == "charge" and f["ip"] == 0 for f in s)
+    assert sum(f["ik"] for f in s) > 16 + 5
+    assert res["free_sessions"][0]["kind"] == "power_up" and res["free_sessions"][0]["cap_kwh"] is None
+    # with a capped free session earlier the same day, each keeps its own rule
+    free = [(D0 + timedelta(hours=10), D0 + timedelta(hours=11))]
+    both = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), free_sessions=free, power_up_sessions=pu,
+                 free_cap_kwh=4)
+    assert [(x["kind"], x["cap_kwh"]) for x in both["free_sessions"]] == [("free", 4), ("power_up", None)]
+    assert both["free_sessions"][0]["free_kwh"] == pytest.approx(4, abs=0.05)
+    assert both["free_sessions"][1]["free_kwh"] > 16
+    # the same hour in both calendars (as the Octopus integration lists them): it's the capped one
+    dup = _plan([0.10] * 96, soc=10, load=1.0, now=D0 + timedelta(hours=8), free_sessions=pu, power_up_sessions=pu)
+    assert [(x["kind"], x["cap_kwh"]) for x in dup["free_sessions"]] == [("free", 16)]
+    assert dup["free_sessions"][0]["free_kwh"] == pytest.approx(16, abs=0.05)
 
 
 def test_export_margin():

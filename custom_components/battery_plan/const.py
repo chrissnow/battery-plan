@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -83,6 +83,8 @@ CONF_DISPATCH_CHARGES = "dispatch_charges_battery"
 CONF_TARGET_TIME_ENTITY = "target_time_entity"
 CONF_SAVING_CALENDAR = "saving_calendar"
 CONF_FREE_CALENDAR = "free_calendar"
+CONF_FREE_CAP_KWH = "free_cap_kwh"
+CONF_POWER_UP_CALENDAR = "power_up_calendar"
 
 # Control (optional, off by default)
 CONF_SETPOINT_ENTITY = "grid_setpoint_entity"
@@ -146,6 +148,7 @@ DEFAULTS: dict = {
     CONF_WEATHER_COOLING: False,
     CONF_WEATHER_DAYS: 21,
     CONF_DISPATCH_CHARGES: True,
+    CONF_FREE_CAP_KWH: 16,
     CONF_GRID_POWER_INVERT: False,
     CONF_BATTERY_POWER_INVERT: False,
     CONF_USE_ENERGY_COSTS: True,
@@ -215,6 +218,8 @@ SECTIONS: dict[str, list[str]] = {
         CONF_TARGET_TIME_ENTITY,
         CONF_SAVING_CALENDAR,
         CONF_FREE_CALENDAR,
+        CONF_FREE_CAP_KWH,
+        CONF_POWER_UP_CALENDAR,
     ],
     SEC_ACTUALS: [
         CONF_USE_ENERGY_COSTS,

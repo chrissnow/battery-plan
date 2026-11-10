@@ -1,5 +1,6 @@
 """Control (dry run + switch) and battery action tests."""
 from datetime import datetime, timedelta, timezone
+import math
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed, async_mock_service
@@ -248,23 +249,30 @@ async def _free_session_setup(hass, freezer, soc, at):
 
 async def test_free_session_ahead(hass, octopus_states, freezer) -> None:
     """Before a free session: export to make room (the refill is free), charge schedule still parked."""
-    await _free_session_setup(hass, freezer, 80, datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc))
+    # 95%: the capped 16 kWh (4.5 kWh of it house load over 3 h) still needs room making
+    await _free_session_setup(hass, freezer, 95, datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc))
     a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
     assert a["free_session"][0].startswith("2026-11-04T13:00")
     before = [f for f in a["forecast"] if f["t"] <= "2026-11-04T13:00:00.000Z"]
     assert any(f["mode"] == "export" for f in before)  # 17p export, refilled for free: make room
     session = [f for f in a["forecast"] if "2026-11-04T13:00:00.000Z" < f["t"] <= "2026-11-04T16:00:00.000Z"]
-    assert session[0]["mode"] == "charge" and all(f["ip"] == 0 for f in session)
+    assert session[0]["mode"] == "charge" and session[0]["ip"] == 0
+    assert a["free_sessions"][0]["free_kwh"] == pytest.approx(16, abs=0.05)  # capped (default 16 kWh)
     assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == 0  # not yet
 
 
 async def test_free_session_charging(hass, octopus_states, freezer) -> None:
-    """In a free session: charge schedule raised, current spread to finish 15 min early, charging setpoint."""
+    """In a free session: charge at the planned rate up to the plan's SOC where the 16 kWh of free
+    import runs out (house load included), charging setpoint."""
     await _free_session_setup(hass, freezer, 40, datetime(2026, 11, 4, 13, 30, tzinfo=timezone.utc))
-    assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == 100
+    a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+    run = [f for f in a["forecast"] if "2026-11-04T13:30" < f["t"] <= "2026-11-04T16:00:00.000Z"]
+    assert [f["mode"] for f in run][:3] == ["charge", "charge", "self"]  # 13:30-14:30, then the cap
+    peak = math.ceil(max(f["soc"] for f in run[:2]))
+    assert 50 < peak < 100
+    assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == peak
     st = hass.states.get("sensor.battery_plan_control_status").attributes
-    assert st["top_up_finish_by"].startswith("2026-11-04T15:45")
-    kw = 0.6 * 61.7 / 2.25 + 0.26  # 60% to go in 2 h 15 min, plus make-up
-    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(kw * 1000 / 51.2, rel=0.03)
+    assert st["top_up_finish_by"] is None  # not spread over the session
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(17.6 * 1000 / 51.2, abs=0.1)
     assert float(val(hass, "sensor.battery_plan_target_grid_setpoint")) == 0, (st["reason"], st["mode"])
 

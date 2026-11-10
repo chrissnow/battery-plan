@@ -142,14 +142,18 @@
               "dispatch_charges_battery": "Dispatches charge the battery",
               "target_time_entity": "IOG ready time",
               "saving_calendar": "Saving session calendar",
-              "free_calendar": "Free electricity calendar"
+              "free_calendar": "Free electricity calendar",
+              "free_cap_kwh": "Free import per session",
+              "power_up_calendar": "Power Up calendar"
             },
             "data_description": {
               "dispatching_entity": "Optional: …_intelligent_dispatching binary sensor; its planned dispatches are added to the plan.",
               "dispatch_charges_battery": "Treat dispatches outside the charge window as full-rate battery top-ups.",
               "target_time_entity": "Optional: …_intelligent_target_time select/time entity, for the dispatch-hours sensors.",
               "saving_calendar": "Optional: Octoplus saving sessions calendar.",
-              "free_calendar": "Optional: Octoplus free electricity / power-up calendar."
+              "free_calendar": "Optional: Octoplus free electricity sessions calendar (capped, see below).",
+              "free_cap_kwh": "Free electricity is capped at this much import per session (house and car included; 0 = no cap). Past it the battery stops charging at peak, but carries on where import is off-peak anyway (an IOG dispatch).",
+              "power_up_calendar": "Optional: Octoplus Power Up calendar. Free like a free electricity session, with no cap."
             }
           },
           "actuals": {
@@ -346,14 +350,18 @@
               "dispatch_charges_battery": "Dispatches charge the battery",
               "target_time_entity": "IOG ready time",
               "saving_calendar": "Saving session calendar",
-              "free_calendar": "Free electricity calendar"
+              "free_calendar": "Free electricity calendar",
+              "free_cap_kwh": "Free import per session",
+              "power_up_calendar": "Power Up calendar"
             },
             "data_description": {
               "dispatching_entity": "Optional: …_intelligent_dispatching binary sensor; its planned dispatches are added to the plan.",
               "dispatch_charges_battery": "Treat dispatches outside the charge window as full-rate battery top-ups.",
               "target_time_entity": "Optional: …_intelligent_target_time select/time entity, for the dispatch-hours sensors.",
               "saving_calendar": "Optional: Octoplus saving sessions calendar.",
-              "free_calendar": "Optional: Octoplus free electricity / power-up calendar."
+              "free_calendar": "Optional: Octoplus free electricity sessions calendar (capped, see below).",
+              "free_cap_kwh": "Free electricity is capped at this much import per session (house and car included; 0 = no cap). Past it the battery stops charging at peak, but carries on where import is off-peak anyway (an IOG dispatch).",
+              "power_up_calendar": "Optional: Octoplus Power Up calendar. Free like a free electricity session, with no cap."
             }
           },
           "actuals": {
