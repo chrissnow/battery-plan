@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.6**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.7**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -28,7 +28,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 61 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 62 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -72,7 +72,7 @@ Test gotchas learned the hard way:
 | `switch.py` / `select.py` / `number.py` / `binary_sensor.py` | Control switches (setpoint keeps unique id `<entry>_control`; both restore their state), override select, custom setpoint, EV inhibit and final-IOG-slot binary sensors. |
 | `config_flow.py` | Two-step setup (name, then sectioned settings) and an options flow with the same form. `FIELDS` = selector + required flag. |
 | `__init__.py` | Serves `www/battery-plan-card.js` and registers/updates it as a storage-mode Lovelace resource (falls back to `add_extra_js_url` for YAML mode). |
-| `www/battery-plan-card.js` | The card: SOC history + forecast, plan/past-action bands, stepped export floor and min SOC line, load strip (base/heating/cooling bars, forecast temperature, actual load from 5-min statistics), cost table (today = actual so far + plan; unpriced import shown, never priced), collapsed weather-model panel. Draws at its real width (ResizeObserver). |
+| `www/battery-plan-card.js` | The card: SOC history + forecast, plan/past-action bands, stepped export floor and min SOC line, load strip (base/heating/cooling bars, forecast temperature, actual load from 5-min statistics), cost table (today = actual so far + plan; unpriced import shown, never priced), planned actions table (`show_actions`, default on: blocks with energy, end SOC and value from the forecast), collapsed weather-model panel. Draws at its real width (ResizeObserver). |
 | `docs/node-red-watchdog.json` | Node-RED flow for the GX, on its own tab: resets the setpoint to −50 W and DVCC to the maximum if the MQTT heartbeat stops for 2 min. Set the DVCC value for your system. |
 
 ## Known issues
@@ -84,6 +84,14 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.6.7: peak buying only above the import price; planned actions; weather section
+
+- Buy at peak (`export_peak_import`): an export may leave the house buying at peak (afterwards or
+  in advance) only if its rate is at least the peak import price + margin (`beats_peak`). Judged
+  on the whole plan, a step whose energy mostly came back cheaply overnight bought a little at
+  peak for a 32.5p export against 34.26p import (10 Nov plan: 0.16 kWh at 23:00).
+- Card: planned actions table (on by default). Settings: weather-dependent load in its own section.
 
 ## 0.6.6: buy-sell-buy at full power, dispatches and the Zappi
 

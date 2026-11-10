@@ -1,7 +1,7 @@
 // battery-plan-card — Battery Plan integration card.
 // Actual SOC (history) + forecast SOC with charge/export bands, and a planned cost table.
 // Config: entity (the "SOC at next charge" sensor), soc_entity (optional, defaults to the planner's),
-//         hours_past (12), height (240), show_costs (true), show_load (true), title.
+//         hours_past (12), height (240), show_costs (true), show_load (true), show_actions (true), title.
 // With the planner's weather model on, a load strip shows base load + heating/cooling and the forecast temperature.
 const BP_COLORS = { charge: '#3b82f6', iog: '#14b8a6', export: '#f59e0b', saving: '#eab308', grid: '#ef4444' };
 const BP_HEAT = '#f97316', BP_COOL = '#0ea5e9', BP_BASE = '#94a3b8';
@@ -21,9 +21,10 @@ class BatteryPlanCard extends HTMLElement {
         ] },
         { name: 'show_costs', selector: { boolean: {} } },
         { name: 'show_load', selector: { boolean: {} } },
+        { name: 'show_actions', selector: { boolean: {} } },
       ],
       computeLabel: s => ({ entity: 'Battery Plan sensor (SOC at next charge)', soc_entity: 'Actual SOC sensor (optional)', action_entity: 'Battery action sensor (optional, for past bands)', title: 'Title',
-        hours_past: 'History shown', height: 'Chart height', show_costs: 'Show planned costs', show_load: 'Show house load strip' }[s.name]),
+        hours_past: 'History shown', height: 'Chart height', show_costs: 'Show planned costs', show_load: 'Show house load strip', show_actions: 'Show planned actions' }[s.name]),
     };
   }
 
@@ -34,7 +35,7 @@ class BatteryPlanCard extends HTMLElement {
 
   setConfig(config) {
     if (!config.entity) throw new Error('Pick the Battery Plan "SOC at next charge" sensor');
-    this._config = Object.assign({ hours_past: 12, height: 240, show_costs: true, show_load: true }, config);
+    this._config = Object.assign({ hours_past: 12, height: 240, show_costs: true, show_load: true, show_actions: true }, config);
     if (!this.shadowRoot) this.attachShadow({ mode: 'open' });
     this._hist = []; this._histAt = 0; this._key = null;
     if (this._hass) this._render();
@@ -53,7 +54,7 @@ class BatteryPlanCard extends HTMLElement {
 
   disconnectedCallback() { if (this._ro) this._ro.disconnect(); }
 
-  getCardSize() { return (this._config && this._config.show_costs ? 7 : 5) + (this._config && this._config.show_load ? 2 : 0); }
+  getCardSize() { const c = this._config || {}; return (c.show_costs ? 7 : 5) + (c.show_load ? 2 : 0) + (c.show_actions ? 3 : 0); }
   getGridOptions() { return { columns: 'full', min_columns: 6, rows: 'auto' }; }
 
   _socEntity() {
@@ -135,6 +136,33 @@ class BatteryPlanCard extends HTMLElement {
   _money(v, cur) {
     try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'GBP' }).format(v); }
     catch (e) { return v.toFixed(2); }
+  }
+
+  _actionsTable(a) {
+    // the plan's blocks with what each one earns or costs (export earnings less import, house
+    // load included), from the half-hour forecast; '*' where some import isn't priced yet
+    const plan = a.plan || [], fc = (a.forecast || []).map(f => ({ ...f, t: Date.parse(f.t) }));
+    if (!plan.length) return '';
+    const cur = (this._hass.config && this._hass.config.currency) || 'GBP';
+    let anyUn = false;
+    const rows = plan.map(b => {
+      const s = Date.parse(b.start), e = Date.parse(b.end);
+      let v = 0, un = false;
+      fc.forEach(f => {
+        if (f.t > s && f.t <= e) {
+          if (f.ik > 0 && f.ip == null) un = true;
+          v += (f.ek || 0) * (f.rate || 0) / 100 - (f.ik || 0) * (f.ip || 0) / 100;
+        }
+      });
+      anyUn = anyUn || un;
+      const sign = v >= 0.005 ? '+' : (v <= -0.005 ? '−' : '');
+      const when = `${this._fmtTime(s, true)}–${this._fmtTime(e)}`;
+      const sw = BP_COLORS[b.mode] ? `<i class="sw" style="background:${BP_COLORS[b.mode]}"></i>` : '';
+      return `<tr><td>${sw}${BP_NAMES[b.mode] || b.mode}<small>${when}</small></td><td>${b.kwh.toFixed(1)} kWh</td><td>${b.end_soc}%</td>
+        <td class="${v >= 0.005 ? 'pos' : (v <= -0.005 ? 'neg' : '')}">${sign}${this._money(Math.abs(v), cur)}${un ? '*' : ''}</td></tr>`;
+    }).join('');
+    const note = `Value: export earnings less import cost in the block, house load included.${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
+    return `<table class="cost acts"><thead><tr><th>Planned actions</th><th>Energy</th><th>End SOC</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table><div class="note">${note}</div>`;
   }
 
   _costTable(a) {
@@ -328,6 +356,8 @@ class BatteryPlanCard extends HTMLElement {
         td.pos { color: var(--success-color, #16a34a); font-weight: 600; }
         td.neg { color: var(--error-color, #dc2626); font-weight: 600; }
         table.cost td small.wx { display:block; color: ${BP_HEAT}; }
+        table.acts i.sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align: baseline; }
+        .note { font-size: 11px; color: var(--secondary-text-color); margin-top: 4px; }
         svg.strip { margin-top: 2px; }
         .act { fill:none; stroke: var(--primary-text-color, #444); stroke-width: 1.6; opacity: .6; }
         .temp { fill:none; stroke: ${BP_HEAT}; stroke-width: 1.5; stroke-dasharray: 4 3; opacity: .9; }
@@ -356,6 +386,7 @@ class BatteryPlanCard extends HTMLElement {
         <div class="leg"><span><i style="background:var(--primary-text-color,#444)"></i>Actual</span><span><i style="background:var(--primary-color,#03a9f4);opacity:1"></i>Forecast</span>${legend}${showLoad ? `<span><i class="sq" style="background:${BP_BASE}"></i>House load</span>${wmOn ? `<span><i class="sq" style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord}</span>` : ''}` : ''}</div>
         ${wxLine}
         ${c.show_costs ? this._costTable(a) : ''}
+        ${c.show_actions ? this._actionsTable(a) : ''}
         ${model}
       </ha-card>`;
 

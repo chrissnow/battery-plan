@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -15,6 +15,7 @@ SEC_TARIFF = "tariff"
 SEC_CHARGING = "charging"
 SEC_EXPORT = "export"
 SEC_LOAD = "load"
+SEC_WEATHER = "weather"
 SEC_OCTOPUS = "octopus"
 SEC_ACTUALS = "actuals"
 SEC_CONTROL = "control"
@@ -216,6 +217,8 @@ SECTIONS: dict[str, list[str]] = {
         CONF_LOAD_EXCLUDE,
         CONF_LOAD_DAYS,
         CONF_LOAD_KW,
+    ],
+    SEC_WEATHER: [
         CONF_WEATHER_ENTITY,
         CONF_OUTDOOR_TEMP_ENTITY,
         CONF_WEATHER_LOAD_ENTITIES,

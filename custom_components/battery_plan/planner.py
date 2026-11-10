@@ -517,6 +517,16 @@ class _ExportSearch:
                 short = max(short, self.tgt_kwh - rows[b]["kwh"] - self.short0[b])
         return v, ek_tot, peak, short
 
+    def beats_peak(self, j: int) -> bool:
+        """With buy at peak on: an export may leave the house buying at peak (afterwards or in
+        advance) only if it pays at least the peak import price plus the margin. Judged on the whole
+        plan, a step whose energy mostly comes back cheaply overnight could otherwise buy a little
+        at peak for an export worth less than the import."""
+        if not self.cfg.export_peak_import:
+            return False
+        peak = max((p for sl, p in zip(self.slots, self.imp_p) if not (sl.cheap or sl.sched)), default=0.0)
+        return (self.slots[j].export_p or 0) / 100 >= peak + self.margin
+
     def order(self, cands: list[int]) -> list[int]:
         """Best price first; at equal prices the latest half hour (a later replan may yet cancel
         it), but inside a charge window the earliest, to leave time to buy the energy back."""
@@ -541,8 +551,8 @@ class _ExportSearch:
 
             def pays(i: int) -> bool:
                 (v0, e0, p0, _), (v1, e1, p1, short) = at(i - 1), at(i)
-                if not cfg.export_peak_import and p1 - p0 > 0.01:
-                    return False
+                if p1 - p0 > 0.01 and not self.beats_peak(j):
+                    return False  # it would leave the house buying at peak for less than that costs
                 if short > self.SHORT_KWH:
                     return False
                 return e1 - e0 > 0.01 and v1 - v0 >= self.margin * (e1 - e0)
@@ -564,6 +574,8 @@ class _ExportSearch:
         for j in order:
             if slots[j].sched:
                 continue  # in a window, buying is just the charge
+            if not self.beats_peak(j):
+                continue  # buying at peak for an export that pays less than that costs
             while self.simulate()[j]["exp_kw"] < cfg.max_export_kw - 0.05:  # held back by the floor
                 steps = self._buy_steps(j, ok, ahead)
                 if not steps:

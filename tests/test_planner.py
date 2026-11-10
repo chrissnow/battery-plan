@@ -228,6 +228,19 @@ def test_export_margin_surplus():
     assert not _grid_before_window(full)
 
 
+def test_no_peak_buying_below_the_import_price():
+    """Buy at peak on, but the export (32.5p) is below the peak import (34.26p) + margin: nothing is
+    bought at peak for it, afterwards or in advance, even where the whole plan would gain a little
+    (most of a step's energy coming back cheaply overnight)."""
+    for soc in (40, 50, 60, 70):
+        for load in (1.5, 2.0, 2.5):
+            on = _arb_plan(soc=soc, exp_peak=0.325, export_peak_import=True, load=load)
+            off = _arb_plan(soc=soc, exp_peak=0.325, load=load)
+            assert not _grid_before_window(on) or _grid_before_window(off), (soc, load)
+            assert not [f for f in on["forecast"] if f["mode"] == "hold" and f["t"] <= "2026-11-04T23:30"]
+            assert _today(on) == pytest.approx(_today(off), abs=0.01), (soc, load)
+
+
 def test_buy_in_advance():
     bought = lambda r: [f for f in r["forecast"] if f["mode"] in ("hold", "charge") and "2026-11-04T12:30" <= f["t"] <= "2026-11-04T23:30"]
     # 50p peak vs 34.26p import: buying afterwards isn't enough to export at full power, so
