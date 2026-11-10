@@ -144,18 +144,35 @@ class BatteryPlanCard extends HTMLElement {
     const cur = (this._hass.config && this._hass.config.currency) || 'GBP';
     const sc = a.standing_charge || 0;
     const todayKey = new Date().toLocaleDateString('en-CA');
+    const act = a.actual_today;
     const rows = keys.map(k => {
-      const d = days[k];
+      const p = days[k];
+      // today: what has happened so far (actual) plus the plan for the rest of the day
+      const whole = k === todayKey && act;
+      const d = whole ? {
+        ...p,
+        import_cost: p.import_cost + act.import_cost, import_kwh: p.import_kwh + act.import_kwh,
+        export_value: p.export_value + act.export_value, export_kwh: p.export_kwh + act.export_kwh,
+      } : p;
       const net = d.export_value - d.import_cost - sc;
-      const label = k === todayKey ? 'Today (rest)' : new Date(k + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
-        + (d.hours != null && d.hours < 23 ? ` <small class="part">to ${String(Math.round(d.hours)).padStart(2, '0')}:00</small>` : '');
-      const wx = d.weather_kwh > 0.05 ? `<small class="wx">incl. ${d.weather_kwh.toFixed(1)} kWh ${a.weather_model && a.weather_model.cooling_kw_per_c && !a.weather_model.heating_kw_per_c ? 'cooling' : 'heating'}</small>` : '';
-      return `<tr><td>${label}${d.priced === false ? ' <span title="Some import is unpriced (rates not published yet)">*</span>' : ''}${wx}</td>
-        <td>${this._money(d.import_cost, cur)}<small>${d.import_kwh.toFixed(1)} kWh</small></td>
-        <td>${this._money(d.export_value, cur)}<small>${d.export_kwh.toFixed(1)} kWh</small></td>
-        <td class="${net >= 0 ? 'pos' : 'neg'}">${net >= 0 ? '+' : ''}${this._money(net, cur)}</td></tr>`;
+      const split = (x, y) => whole ? ` title="${this._money(x, cur)} so far + ${this._money(y, cur)} planned"` : '';
+      const label = k === todayKey ? (whole ? 'Today <small class="part">actual + plan</small>' : 'Today (rest)')
+        : new Date(k + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+          + (p.hours != null && p.hours < 23 ? ` <small class="part">to ${String(Math.round(p.hours)).padStart(2, '0')}:00</small>` : '');
+      const wx = p.weather_kwh > 0.05 ? `<small class="wx">incl. ${p.weather_kwh.toFixed(1)} kWh ${a.weather_model && a.weather_model.cooling_kw_per_c && !a.weather_model.heating_kw_per_c ? 'cooling' : 'heating'}${whole ? ' to come' : ''}</small>` : '';
+      // import past the published rates isn't priced: show how much, and no net for the day
+      const un = p.unpriced_kwh || 0;
+      const allUn = un > 0 && un >= d.import_kwh - 0.05;
+      const impCost = allUn ? '—' : this._money(d.import_cost, cur) + (un > 0 ? ' +' : '');
+      const impKwh = `${d.import_kwh.toFixed(1)} kWh${un > 0 && !allUn ? `, ${un.toFixed(1)} unpriced` : ''}`;
+      const netCell = un > 0 ? '<td title="Some import is unpriced (rates not published yet)">—</td>'
+        : `<td class="${net >= 0 ? 'pos' : 'neg'}">${net >= 0 ? '+' : ''}${this._money(net, cur)}</td>`;
+      return `<tr><td>${label}${un > 0 ? ' <span title="Rates not published yet">*</span>' : ''}${wx}</td>
+        <td${split(act && act.import_cost, p.import_cost)}>${impCost}<small>${impKwh}</small></td>
+        <td${split(act && act.export_value, p.export_value)}>${this._money(d.export_value, cur)}<small>${d.export_kwh.toFixed(1)} kWh</small></td>
+        ${netCell}</tr>`;
     }).join('');
-    return `<table class="cost"><thead><tr><th>Planned</th><th>Import</th><th>Export</th><th>Net${sc ? ' <small>inc. standing</small>' : ''}</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table class="cost"><thead><tr><th>${act ? 'Day' : 'Planned'}</th><th>Import</th><th>Export</th><th>Net${sc ? ' <small>inc. standing</small>' : ''}</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
 
   _render() {

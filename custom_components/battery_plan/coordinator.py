@@ -572,6 +572,12 @@ class BatteryPlanCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 past = self._w_past.get(ds, 0.0)
                 result[key] = None if (planned is None and not past) or not m.active else round((planned or 0.0) + past, 2)
         result["standing_charge"] = self.standing_charge()
+        # what today has cost so far, so the card's "today" row can cover the whole day
+        t = self.costs.today if self.costs.enabled else None
+        result["actual_today"] = (
+            {k: round(t[k], 3) for k in ("import_kwh", "import_cost", "export_kwh", "export_value")}
+            if t and t.get("date") == dt_util.now().date().isoformat() else None
+        )
         result["soc_entity"] = self.opts[CONF_SOC_ENTITY]
         result["action_entity"] = self.action_entity_id
 

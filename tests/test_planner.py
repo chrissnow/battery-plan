@@ -179,6 +179,15 @@ def test_power_up_has_no_cap():
     assert dup["free_sessions"][0]["free_kwh"] == pytest.approx(16, abs=0.05)
 
 
+def test_unpriced_import_not_made_up():
+    """Past the published import rates nothing is invented: that import is reported as unpriced."""
+    res = _plan([0.10] * 96, imp=IOG, now=D0 + timedelta(hours=20))  # import rates for 4 Nov only
+    tmrw = res["days"]["2026-11-05"]
+    assert tmrw["priced"] is False and tmrw["unpriced_kwh"] == pytest.approx(tmrw["import_kwh"], abs=0.05)
+    assert tmrw["import_cost"] == 0
+    assert "unpriced_kwh" not in res["days"]["2026-11-04"]
+
+
 def test_export_margin():
     # 50% = 30 kWh; 11.5 h of 2 kW load reaches the window below the 20% floor: no surplus.
     # The energy the house would use below the floor is exported at 38p and replaced in the

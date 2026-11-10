@@ -682,11 +682,12 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         d["import_kwh"] += ik
         d["export_kwh"] += ek
         if sl.import_gbp is None and paid > 1e-6:
-            d["priced"] = False
+            d["priced"] = False  # rates not published yet: this import isn't in import_cost
+            d["unpriced_kwh"] = d.get("unpriced_kwh", 0.0) + paid
         d["import_cost"] += paid * (sl.import_gbp or 0)
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
-        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh"):
+        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh", "unpriced_kwh"):
             if k in d:
                 d[k] = _r(d[k], 2 if "kwh" in k else 3)
         d["hours"] = _r(d["hours"], 2)
