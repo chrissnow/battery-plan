@@ -179,6 +179,17 @@ def test_power_up_has_no_cap():
     assert dup["free_sessions"][0]["free_kwh"] == pytest.approx(16, abs=0.05)
 
 
+def test_inverter_limit_includes_house_load():
+    """The inverter's AC output feeds the house first: export is planned at no more than its
+    maximum less the house load (12.5 kW Quattro, ~2 kW evening load: ~10.5 kW, not 11)."""
+    free = _arb_plan(soc=100, exp_peak=0.40)
+    capped = _arb_plan(soc=100, exp_peak=0.40, inverter_kw=10)  # max export 10 kW, load 2 kW
+    peak = lambda r: [f for f in r["forecast"] if "2026-11-04T16:30" <= f["t"] <= "2026-11-04T19:00:00.000Z"]
+    assert max(f["exp"] for f in peak(free)) == pytest.approx(10, abs=0.01)
+    assert max(f["exp"] for f in peak(capped)) == pytest.approx(8, abs=0.01)
+    assert all(f["exp"] + f["ld"] <= 10 + 0.01 for f in capped["forecast"])
+
+
 def test_unpriced_import_not_made_up():
     """Past the published import rates nothing is invented: that import is reported as unpriced."""
     res = _plan([0.10] * 96, imp=IOG, now=D0 + timedelta(hours=20))  # import rates for 4 Nov only

@@ -59,7 +59,7 @@ from .const import (
     CONF_EV_ALLOW_ENTITY,
     CONF_EV_ALLOW_INVERT,
     CONF_EXPORT_TRACKING,
-    CONF_EXPORT_RUN_RATE_P,
+    CONF_EXPORT_HOLD_MIN,
     CONF_HEARTBEAT_TOPIC,
     CONF_IDLE_SETPOINT_W,
     CONF_LIMITED_EXPORT_KW,
@@ -139,6 +139,7 @@ class Controller:
         self._spread: float | None = None
         self._topup_spread: float | None = None
         self.topup_until: datetime | None = None
+        self._held: tuple[str, float] | None = None  # (slot end, export kW) being tracked
         self._written: dict[str, float] = {}
         self._unsubs: list[Callable[[], None]] = []
         self._listeners: list[Callable[[], None]] = []
@@ -322,6 +323,8 @@ class Controller:
         """Grid setpoint (W) and why: the override if any, else what the plan's slot asks for."""
         cfg, o, soc, mode = c.cfg, c.o, c.soc, slot["mode"]
         floor = self.floor
+        # not limited by the inverter's output (the planner allows for that): asking for more
+        # does no harm, and the GX's ESS delivers what it can
         cap = max(cfg.max_export_kw, cfg.saving_export_kw or 0)
 
         def export(kw: float, why: str) -> tuple[float, str]:
@@ -347,12 +350,17 @@ class Controller:
                 return export(-self.custom_w / 1000, "override: custom")
             return float(self.custom_w), "override: custom"
         if mode == "export" and o.get(CONF_EXPORT_TRACKING, True):
-            last = self._export_run_end(c, slot, float(o.get(CONF_EXPORT_RUN_RATE_P, 1.0)))
-            end = dt_util.parse_datetime(last["t"]) or c.now
+            end = dt_util.parse_datetime(slot["t"]) or c.now
+            hold = timedelta(minutes=float(o.get(CONF_EXPORT_HOLD_MIN, 5)))
+            if self._held and self._held[0] == slot["t"] and end - c.now <= hold:
+                # last minutes of the half hour: keep the export as it is. Tracking to the end
+                # here divides a small SOC difference by a few minutes and tapers off or surges
+                return export(self._held[1], f"holding the export for the last {hold.total_seconds() / 60:.0f} min:")
             hrs = max((end - c.now).total_seconds() / 3600, 5 / 60)
-            target = max(float(last["soc"]), floor)
+            target = max(float(slot["soc"]), floor)
             load = self._live_load_kw(slot)
             kw = (soc - target) / 100 * cfg.capacity_kwh / hrs * cfg.discharge_eff - load
+            self._held = (slot["t"], kw)
             return export(kw, f"export to {target:.0f}% by {dt_util.as_local(end):%H:%M}, load {load:.1f} kW:")
         if mode in ("export", "saving"):
             return export(float(slot.get("exp") or 0), mode)
@@ -363,31 +371,6 @@ class Controller:
         if mode in ("charge", "hold", "iog"):
             return float(o[CONF_CHARGE_SETPOINT_W]), f"{mode} slot"
         return c.idle, "house on battery" if mode == "self" else f"{mode} slot"
-
-    @staticmethod
-    def _export_run_end(c: _Ctx, slot: dict, rate_p: float = 1.0) -> dict:
-        """The last half hour of the export run ``slot`` starts: following export half hours at
-        about the same planned power (within 0.5 kW) and export rate (within ``rate_p`` p/kWh
-        of the first; the export_run_rate_p option, 0 = each half hour on its own unless equal). Tracking to its end, not each half hour's, avoids tapering off at every
-        half-hour boundary and jumping back (and the writes that go with it). A half hour paid
-        noticeably more or less, or planned at a different power (e.g. a run's smaller last half
-        hour), keeps its own target, so a forecast error still lands where the plan put it."""
-        fc = (c.data or {}).get("forecast") or []
-        try:
-            i = fc.index(slot)
-        except ValueError:
-            return slot
-        kw = float(slot.get("exp") or 0)
-        rate = slot.get("rate")
-
-        def same(f: dict) -> bool:
-            if f["mode"] != "export" or abs(float(f.get("exp") or 0) - kw) > 0.5:
-                return False
-            return rate is None or f.get("rate") is None or abs(float(f["rate"]) - float(rate)) <= rate_p
-
-        while i + 1 < len(fc) and same(fc[i + 1]):
-            i += 1
-        return fc[i]
 
     def _topup_finish(self, now: datetime, data: dict | None, cfg: Any) -> datetime | None:
         """Inside an IOG dispatch (if they charge the battery) outside the charge window: when to

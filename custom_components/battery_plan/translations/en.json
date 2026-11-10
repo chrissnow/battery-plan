@@ -90,6 +90,7 @@
             "data": {
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
+              "inverter_max_kw": "Inverter maximum output",
               "discharge_eff": "Discharge efficiency",
               "limited_export_kw": "Limited export power",
               "export_margin": "Export margin",
@@ -97,19 +98,20 @@
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
               "export_tracking": "Track SOC when exporting",
-              "export_run_rate_p": "Tracking run rate band"
+              "export_hold_minutes": "Hold the export for the last"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
+              "inverter_max_kw": "Optional: the inverter's maximum AC output, shared by the house load and export (e.g. 12.5 kW for a Quattro 15k). Each half hour's export is planned at no more than this less the house load (the setpoint still asks for the full amount).",
               "discharge_eff": "Battery to AC.",
               "limited_export_kw": "Used by the \"limited export\" override.",
               "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
               "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
-              "export_tracking": "Control only: aim for the plan's SOC at the end of the export run, adjusting for the live house load, instead of exporting a fixed power.",
-              "export_run_rate_p": "Control only: export half hours at the same planned power and within this much of the first one's rate are tracked as one run, to one SOC target (fewer setpoint changes). Bigger spreads a forecast error across more differently paid half hours; 0 tracks each half hour on its own."
+              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power.",
+              "export_hold_minutes": "Control only: in the last minutes of each half hour keep the export power as it is instead of tracking to the end (aiming at the end over a few minutes tapers off or surges). 0 tracks to the end."
             }
           },
           "load": {
@@ -302,6 +304,7 @@
             "data": {
               "max_export_kw": "Maximum export power",
               "saving_export_kw": "Saving session export power",
+              "inverter_max_kw": "Inverter maximum output",
               "discharge_eff": "Discharge efficiency",
               "limited_export_kw": "Limited export power",
               "export_margin": "Export margin",
@@ -309,19 +312,20 @@
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
               "export_tracking": "Track SOC when exporting",
-              "export_run_rate_p": "Tracking run rate band"
+              "export_hold_minutes": "Hold the export for the last"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
               "saving_export_kw": "Optional: power during Octopus saving sessions (defaults to the maximum above).",
+              "inverter_max_kw": "Optional: the inverter's maximum AC output, shared by the house load and export (e.g. 12.5 kW for a Quattro 15k). Each half hour's export is planned at no more than this less the house load (the setpoint still asks for the full amount).",
               "discharge_eff": "Battery to AC.",
               "limited_export_kw": "Used by the \"limited export\" override.",
               "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
               "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
-              "export_tracking": "Control only: aim for the plan's SOC at the end of the export run, adjusting for the live house load, instead of exporting a fixed power.",
-              "export_run_rate_p": "Control only: export half hours at the same planned power and within this much of the first one's rate are tracked as one run, to one SOC target (fewer setpoint changes). Bigger spreads a forecast error across more differently paid half hours; 0 tracks each half hour on its own."
+              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power.",
+              "export_hold_minutes": "Control only: in the last minutes of each half hour keep the export power as it is instead of tracking to the end (aiming at the end over a few minutes tapers off or surges). 0 tracks to the end."
             }
           },
           "load": {

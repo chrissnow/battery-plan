@@ -60,6 +60,7 @@ class PlannerConfig:
     long_balance_min: float = 60.0
     max_export_kw: float = 5.0
     saving_export_kw: float | None = None
+    inverter_kw: float | None = None  # max inverter AC output (house load + export), if limited
     export_margin: float = 5.0  # p/kWh an export must earn over keeping the energy
     export_peak_import: bool = False  # exports may leave the house buying at peak before the window
     buy_ahead_h: float = 3.0  # with export_peak_import: hold / grid-charge at most this long before an export
@@ -390,6 +391,9 @@ def _simulate(
         else:
             load_b = sl.load_kw / eff
             want = exp[i]
+            if want > 0 and cfg.inverter_kw:
+                # the inverter's AC output feeds the house first: export gets what's left
+                want = min(want, max(0.0, cfg.inverter_kw - sl.load_kw))
             if want > 0:
                 room = max(0.0, (kwh - sl.floor / 100 * cap) / sl.hours)
                 exp_b = min(want / eff, max(0.0, room - load_b))
