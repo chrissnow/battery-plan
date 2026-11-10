@@ -59,6 +59,7 @@ from .const import (
     CONF_EV_ALLOW_ENTITY,
     CONF_EV_ALLOW_INVERT,
     CONF_EXPORT_TRACKING,
+    CONF_EXPORT_RUN_RATE_P,
     CONF_HEARTBEAT_TOPIC,
     CONF_IDLE_SETPOINT_W,
     CONF_LIMITED_EXPORT_KW,
@@ -79,8 +80,6 @@ if TYPE_CHECKING:
     from .coordinator import BatteryPlanCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
-RUN_RATE_P = 1.0  # export half hours within this of a run's first rate (p/kWh) share its tracking target
 
 STATUS_DISABLED = "disabled"
 STATUS_ACTIVE = "active"
@@ -348,7 +347,7 @@ class Controller:
                 return export(-self.custom_w / 1000, "override: custom")
             return float(self.custom_w), "override: custom"
         if mode == "export" and o.get(CONF_EXPORT_TRACKING, True):
-            last = self._export_run_end(c, slot)
+            last = self._export_run_end(c, slot, float(o.get(CONF_EXPORT_RUN_RATE_P, 1.0)))
             end = dt_util.parse_datetime(last["t"]) or c.now
             hrs = max((end - c.now).total_seconds() / 3600, 5 / 60)
             target = max(float(last["soc"]), floor)
@@ -366,10 +365,10 @@ class Controller:
         return c.idle, "house on battery" if mode == "self" else f"{mode} slot"
 
     @staticmethod
-    def _export_run_end(c: _Ctx, slot: dict) -> dict:
+    def _export_run_end(c: _Ctx, slot: dict, rate_p: float = 1.0) -> dict:
         """The last half hour of the export run ``slot`` starts: following export half hours at
-        about the same planned power (within 0.5 kW) and export rate (within ``RUN_RATE_P`` of
-        the first). Tracking to its end, not each half hour's, avoids tapering off at every
+        about the same planned power (within 0.5 kW) and export rate (within ``rate_p`` p/kWh
+        of the first; the export_run_rate_p option, 0 = each half hour on its own unless equal). Tracking to its end, not each half hour's, avoids tapering off at every
         half-hour boundary and jumping back (and the writes that go with it). A half hour paid
         noticeably more or less, or planned at a different power (e.g. a run's smaller last half
         hour), keeps its own target, so a forecast error still lands where the plan put it."""
@@ -384,7 +383,7 @@ class Controller:
         def same(f: dict) -> bool:
             if f["mode"] != "export" or abs(float(f.get("exp") or 0) - kw) > 0.5:
                 return False
-            return rate is None or f.get("rate") is None or abs(float(f["rate"]) - float(rate)) <= RUN_RATE_P
+            return rate is None or f.get("rate") is None or abs(float(f["rate"]) - float(rate)) <= rate_p
 
         while i + 1 < len(fc) and same(fc[i + 1]):
             i += 1

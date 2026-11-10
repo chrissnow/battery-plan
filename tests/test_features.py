@@ -52,6 +52,8 @@ def test_export_run_end() -> None:
     assert Controller._export_run_end(c, fc[0])["t"] == "18:00"
     assert Controller._export_run_end(c, fc[3])["t"] == "18:30"
     assert Controller._export_run_end(c, fc[4])["t"] == "19:00"  # smaller last half hour: its own target
+    assert Controller._export_run_end(c, fc[0], 2.0)["t"] == "18:30"  # a wider band (the option)
+    assert Controller._export_run_end(c, fc[0], 0.0)["t"] == "17:00"  # 0: each half hour on its own
     assert Controller._export_run_end(SimpleNamespace(data={"forecast": []}), fc[0]) is fc[0]
     # a half hour paid noticeably more ends the run before it, so a surplus isn't spread into it
     peak = [f("17:00", "export", 11, 66, 30.0), f("17:30", "export", 11, 54, 30.5), f("18:00", "export", 11, 42, 38.0)]

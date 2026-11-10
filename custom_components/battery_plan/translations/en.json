@@ -96,7 +96,8 @@
               "export_peak_import": "Buy at peak to export more",
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
-              "export_tracking": "Track SOC when exporting"
+              "export_tracking": "Track SOC when exporting",
+              "export_run_rate_p": "Tracking run rate band"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
@@ -107,7 +108,8 @@
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
               "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
-              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
+              "export_tracking": "Control only: aim for the plan's SOC at the end of the export run, adjusting for the live house load, instead of exporting a fixed power.",
+              "export_run_rate_p": "Control only: export half hours at the same planned power and within this much of the first one's rate are tracked as one run, to one SOC target (fewer setpoint changes). Bigger spreads a forecast error across more differently paid half hours; 0 tracks each half hour on its own."
             }
           },
           "load": {
@@ -306,7 +308,8 @@
               "export_peak_import": "Buy at peak to export more",
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
-              "export_tracking": "Track SOC when exporting"
+              "export_tracking": "Track SOC when exporting",
+              "export_run_rate_p": "Tracking run rate band"
             },
             "data_description": {
               "max_export_kw": "Grid-side export power when exporting.",
@@ -317,7 +320,8 @@
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
               "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
-              "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power."
+              "export_tracking": "Control only: aim for the plan's SOC at the end of the export run, adjusting for the live house load, instead of exporting a fixed power.",
+              "export_run_rate_p": "Control only: export half hours at the same planned power and within this much of the first one's rate are tracked as one run, to one SOC target (fewer setpoint changes). Bigger spreads a forecast error across more differently paid half hours; 0 tracks each half hour on its own."
             }
           },
           "load": {

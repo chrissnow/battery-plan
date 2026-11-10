@@ -62,6 +62,7 @@ CONF_NIGHT_CYCLE = "night_cycle"
 CONF_CHARGE_SOC_WINDOW = "charge_schedule_window"
 CONF_LIMITED_EXPORT_KW = "limited_export_kw"
 CONF_EXPORT_TRACKING = "export_tracking"
+CONF_EXPORT_RUN_RATE_P = "export_run_rate_p"
 CONF_DISCHARGE_EFF = "discharge_eff"
 
 # Load
@@ -123,6 +124,7 @@ DEFAULTS: dict = {
     CONF_DAY_RESERVE_END: "22:25:00",
     CONF_LIMITED_EXPORT_KW: 4.0,
     CONF_EXPORT_TRACKING: True,
+    CONF_EXPORT_RUN_RATE_P: 1.0,
     CONF_EXPORT_PEAK_IMPORT: False,
     CONF_BUY_AHEAD_H: 3,
     CONF_NIGHT_CYCLE: False,
@@ -201,6 +203,7 @@ SECTIONS: dict[str, list[str]] = {
         CONF_BUY_AHEAD_H,
         CONF_NIGHT_CYCLE,
         CONF_EXPORT_TRACKING,
+        CONF_EXPORT_RUN_RATE_P,
         CONF_DISCHARGE_EFF,
     ],
     SEC_LOAD: [
