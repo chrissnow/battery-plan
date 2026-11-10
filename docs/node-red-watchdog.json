@@ -1,8 +1,16 @@
 [
  {
+  "id": "b1a7c0de00000000",
+  "type": "tab",
+  "label": "Battery Plan Watchdog",
+  "disabled": false,
+  "info": "Resets the grid setpoint to -50 W and the DVCC charge current to max if Battery Plan's MQTT heartbeat (HomeAssistant/BatteryPlan/heartbeat) stops for 2 minutes. Keep this tab enabled whenever Battery Plan's control switches are on.",
+  "env": []
+ },
+ {
   "id": "b1a7c0de00000001",
   "type": "group",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "name": "Battery Plan watchdog: grid setpoint -50 W and DVCC max if HA control goes quiet",
   "style": {
    "label": true
@@ -15,15 +23,15 @@
    "b1a7c0de00000006",
    "b1a7c0de00000007"
   ],
-  "x": 54,
-  "y": 2499,
+  "x": 34,
+  "y": 19,
   "w": 872,
   "h": 162
  },
  {
   "id": "b1a7c0de00000002",
   "type": "mqtt in",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "name": "Battery Plan heartbeat",
   "topic": "HomeAssistant/BatteryPlan/heartbeat",
@@ -35,7 +43,7 @@
   "rh": 0,
   "inputs": 0,
   "x": 200,
-  "y": 2540,
+  "y": 60,
   "wires": [
    [
     "b1a7c0de00000003"
@@ -45,7 +53,7 @@
  {
   "id": "b1a7c0de00000003",
   "type": "trigger",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "name": "no 'on' for 2 min \u2192 fire once ('off' cancels)",
   "op1": "",
@@ -61,7 +69,7 @@
   "topic": "topic",
   "outputs": 1,
   "x": 470,
-  "y": 2540,
+  "y": 60,
   "wires": [
    [
     "b1a7c0de00000004",
@@ -73,7 +81,7 @@
  {
   "id": "b1a7c0de00000004",
   "type": "victron-output-ess",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "outputs": 0,
   "service": "com.victronenergy.settings",
@@ -92,13 +100,13 @@
   "name": "Grid setpoint",
   "onlyChanges": false,
   "x": 790,
-  "y": 2540,
+  "y": 60,
   "wires": []
  },
  {
   "id": "b1a7c0de00000005",
   "type": "debug",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "name": "watchdog fired",
   "active": true,
@@ -110,13 +118,13 @@
   "statusVal": "payload",
   "statusType": "auto",
   "x": 780,
-  "y": 2580,
+  "y": 100,
   "wires": []
  },
  {
   "id": "b1a7c0de00000006",
   "type": "change",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "name": "DVCC max (A): max charge kW / battery V",
   "rules": [
@@ -129,7 +137,7 @@
    }
   ],
   "x": 520,
-  "y": 2620,
+  "y": 140,
   "wires": [
    [
     "b1a7c0de00000007"
@@ -139,7 +147,7 @@
  {
   "id": "b1a7c0de00000007",
   "type": "victron-output-ess",
-  "z": "5dcd501bec3e1b41",
+  "z": "b1a7c0de00000000",
   "g": "b1a7c0de00000001",
   "outputs": 0,
   "service": "com.victronenergy.settings",
@@ -158,7 +166,7 @@
   "name": "DVCC charge current",
   "onlyChanges": false,
   "x": 800,
-  "y": 2620,
+  "y": 140,
   "wires": []
  }
 ]
