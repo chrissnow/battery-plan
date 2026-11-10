@@ -80,6 +80,23 @@ async def test_current_deadband(hass, octopus_states, freezer) -> None:
     assert len([c for c in calls if c.data["entity_id"] == CUR]) == n  # ... but wasn't written
 
 
+async def test_ev_inhibit_in_window(hass, octopus_states, freezer) -> None:
+    """Exporting inside the charge window (buy-sell-buy): the EV is inhibited, unless an IOG dispatch
+    is under way, so the car's own off-peak charging isn't blocked."""
+    t = lambda h, m: datetime(2026, 11, 4, h, m, tzinfo=timezone.utc)
+    await setup(hass, freezer, control_opts(), at=t(0, 10))
+    await hass.services.async_call("select", "select_option", {"entity_id": "select.battery_plan_override", "option": "max_export"}, blocking=True)
+    await hass.async_block_till_done()
+    assert float(val(hass, "sensor.battery_plan_target_grid_setpoint")) < -200
+    assert val(hass, "binary_sensor.battery_plan_ev_inhibit") == "on"
+    # a dispatch from 00:00 to 01:00: the car is meant to charge, so it isn't inhibited
+    hass.states.async_set("binary_sensor.dispatching", "on", {"planned_dispatches": [
+        {"start": t(0, 0), "end": t(1, 0), "source": "SMART"}]})
+    await hass.async_block_till_done()
+    await run(hass, freezer)
+    assert val(hass, "binary_sensor.battery_plan_ev_inhibit") == "off"
+
+
 async def test_ev_inhibit(hass, octopus_states, freezer) -> None:
     hass.states.async_set("input_boolean.zappi_allow", "on")
     on = async_mock_service(hass, "input_boolean", "turn_on")

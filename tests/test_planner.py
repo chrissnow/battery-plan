@@ -305,6 +305,53 @@ def test_night_cycle():
     assert soc_at(plain, "05:00", "2026-11-05") == pytest.approx(100, abs=0.5)
     assert not any(f["exp"] > 0 for f in _window(cyc) if f["t"] > "2026-11-05T05:00:00.000Z")
     assert _net(cyc, "2026-11-05T05:30") > _net(plain, "2026-11-05T05:30") + sold * 0.05
+    # the window charges at full power with buy-sell-buy (a spread charge leaves no time to buy back)
+    chg = [f["kw"] for f in _window(cyc) if f["mode"] == "charge" and f["soc"] < 99]
+    assert chg and max(chg) == pytest.approx(17, abs=0.01)
+    assert max(f["kw"] for f in _window(plain) if f["mode"] == "charge") < 17 - 1  # spread when off
+
+
+def test_night_cycle_full_power_only_when_selling():
+    """With buy-sell-buy on, a window that sells charges at full power up to its last export and
+    never runs the house from the battery instead of charging; one with nothing worth selling spreads."""
+    kw = dict(NIGHT, soc=30, now=D0 + timedelta(hours=20), night_cycle=True)
+    cyc = _plan([0.18] * 144, **kw)
+    w = _window(cyc)
+    assert sum(f["ek"] for f in w) > 3
+    assert not [f for f in w if f["mode"] == "self"]  # an export it can't make doesn't stop the charge
+    last = max(i for i, f in enumerate(w) if f["exp"] > 0)
+    assert max(f["kw"] for f in w[:last] if f["mode"] == "charge") == pytest.approx(17, abs=0.01)
+    # not in a half hour with a dispatch: the car charging there would take the export
+    car = (D0 + timedelta(hours=24, minutes=30), D0 + timedelta(hours=25))
+    disp =_plan([0.18] * 144, dispatches=[car], **kw)
+    assert next(f for f in disp["forecast"] if f["t"] == "2026-11-05T01:00:00.000Z")["exp"] == 0
+    assert sum(f["ek"] for f in _window(disp)) > 3  # still sells in the other half hours
+    # 8p overnight export: nothing clears the margin, so the window spreads as with the option off
+    low = _plan([0.08] * 144, **kw)
+    assert not any(f["exp"] > 0 for f in _window(low))
+    assert max(f["kw"] for f in _window(low) if f["mode"] == "charge") < 17 - 1
+
+
+def test_reject_dispatch_for_peak_export():
+    """A dispatch landing in the evening peak (17:00-17:30, priced off-peak): kept by default (a
+    top-up, no export in it); with reject_dispatch on, exported in instead when it beats the margin.
+    A dispatch inside the overnight window is always kept."""
+    imp = [0.066 if (i < 11 or i >= 47 or i == 34) else 0.3426 for i in range(48)] * 3
+    peak = (D0 + timedelta(hours=17), D0 + timedelta(hours=17, minutes=30))
+    night = (D0 + timedelta(hours=24, minutes=30), D0 + timedelta(hours=25))
+    kw = dict(soc=90, imp=imp, dispatches=[peak, night], export_margin=5)
+    slot = lambda r, t: next(f for f in r["forecast"] if f["t"] == t)
+    keep = _arb_plan(exp_peak=0.38, **kw)
+    assert slot(keep, "2026-11-04T17:30:00.000Z")["mode"] in ("iog", "hold") and slot(keep, "2026-11-04T17:30:00.000Z")["exp"] == 0
+    rej = _arb_plan(exp_peak=0.38, reject_dispatch=True, **kw)
+    s = slot(rej, "2026-11-04T17:30:00.000Z")
+    assert s["mode"] == "export" and s["exp"] > 5
+    assert _net(rej, "2026-11-05T05:30") > _net(keep, "2026-11-05T05:30")
+    # the overnight one is kept either way
+    assert slot(rej, "2026-11-05T01:00:00.000Z")["exp"] == 0
+    # a peak export that doesn't beat the cheap top-up by the margin keeps the dispatch
+    low = _arb_plan(exp_peak=0.12, exp_off=0.10, reject_dispatch=True, **kw)
+    assert slot(low, "2026-11-04T17:30:00.000Z")["exp"] == 0
 
 
 def test_night_cycle_inside_window():

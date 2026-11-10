@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.5**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.6**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -28,7 +28,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 56 tests, ~15 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 61 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -77,12 +77,31 @@ Test gotchas learned the hard way:
 
 ## Known issues
 
-- **DC chargers on the AC output count as house load.** The GX consumption sensors then
-  include their charging in the charge window (and a little in daytime dispatches).
-  Dispatch/session masking (0.3.3) fixed the battery-hours slots, but the window's load is
-  still inflated, which overstates planned import cost. Fix: a template sensor for the
-  chargers' power (DC volts × amps ÷ efficiency) added to the load exclusions.
+- **DC chargers on the AC output can count as house load.** If the GX consumption sensors
+  include their charging, the charge window's load is inflated (overstated planned import
+  cost; buy-sell-buy squeezed by `inverter_max_kw`). Dispatch/session masking (0.3.3) covers
+  the battery-hours slots. Fix it on the GX side so consumption excludes the chargers (done on
+  the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
+  power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.6.6: buy-sell-buy at full power, dispatches and the Zappi
+
+- With `night_cycle` on, a window that sells charges at full power up to its last export
+  half hour, spread after it; a window with nothing worth selling spreads as before
+  (`last_sell` in `_simulate`; the controller's `_window_sells_ahead` matches it). A spread
+  charge left too little time to buy back: a replay of 9-10 Nov gave +£0.46 spread vs +£1.46.
+- A window half hour with an export it can't make (battery at the floor) now charges instead
+  of running the house from the battery.
+- Buy-sell-buy never sells in a window half hour with an IOG dispatch (`_Slot.car`; the car
+  would take the export), and the EV inhibit applies to window exports only while no dispatch is
+  under way (`Controller._dispatch_now`), so the car's off-peak charging is never blocked.
+- `reject_dispatch` (option, off): a dispatch outside the window (e.g. in the evening peak) may
+  be exported in instead of topping up when that beats the margin; the slot shows `export`, the
+  EV is inhibited (the car doesn't charge; Octopus usually reschedules) and the charge schedule
+  isn't raised in it. Dispatches inside the window are always kept.
+- Replays (plan from 22:00, actual rates/SOC/load): 9-10 Nov export 17.6-19.6p: +£1.46;
+  10-11 Nov 15.7-16.3p: +£0.86. Still off on the reference install (needs the schedule 5 steps).
 
 ## 0.6.4: fewer writes, inverter limit, card
 

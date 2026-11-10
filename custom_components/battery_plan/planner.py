@@ -65,6 +65,7 @@ class PlannerConfig:
     export_peak_import: bool = False  # exports may leave the house buying at peak before the window
     buy_ahead_h: float = 3.0  # with export_peak_import: hold / grid-charge at most this long before an export
     night_cycle: bool = False  # may export inside the charge window and buy it back there
+    reject_dispatch: bool = False  # may export in an IOG dispatch (EV inhibited) instead of topping up
     discharge_eff: float = 0.9
     charge_eff: float = 0.93
     dispatch_charges_battery: bool = True
@@ -128,6 +129,7 @@ class _Slot:
     buyback: int | None = None  # in a charge window: the slot ending at its finish-early time
     free_id: int | None = None  # which free session (they each have their own cap)
     cheap: bool = False  # import at the lowest rate seen (off-peak, or a dispatch priced so)
+    car: bool = False  # an IOG dispatch (the car charging) overlaps this half hour
 
 
 def _rate_at(rates: list[Rate], t: datetime) -> float | None:
@@ -290,6 +292,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 ov = (min(e, we) - max(frm, ws)).total_seconds()
                 if ov > 0:
                     iog_h += ov / 3600
+        car = any(_overlaps(s, e, w) for w in inp.dispatches)
         exp_gbp = _rate_at(inp.export_rates, s)
         slots.append(
             _Slot(
@@ -312,6 +315,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 export_p=None if exp_gbp is None else exp_gbp * 100,
                 import_gbp=imp_gbp,
                 free_id=free_id,
+                car=car,
                 cheap=iog_h > 0 or (imp_gbp is not None and low is not None and imp_gbp <= low + 0.001),
             )
         )
@@ -354,15 +358,27 @@ def _simulate(
     left: dict[int, float] = {}
     for k, (fs, _, fcap) in enumerate(frees):
         left[k] = max(0.0, fcap - (inp.free_used_kwh if fs <= now else 0.0))
+    # buy-sell-buy: each window's last half hour that sells (by its buy-back slot); up to it the
+    # window charges at full power, as a spread charge leaves no time to buy back much
+    last_sell: dict[int, int] = {}
+    if cfg.night_cycle:
+        for i, sl in enumerate(slots):
+            if sl.sched and exp[i] > 0 and sl.buyback is not None:
+                last_sell[sl.buyback] = i
     rows = []
     for i, sl in enumerate(slots):
         exp_kw = imp_kw = free_kw = 0.0
         # a free session charges while it has free import left, or past that where import is off-peak
         # (less than the house load's worth left at peak: the battery runs the house instead)
         free_now = sl.free_id is not None and (sl.cheap or left[sl.free_id] > max(0.05, sl.load_kw * sl.hours))
-        if (sl.sched or free_now) and not (exp[i] > 0 and sl.sched and not free_now):
+        # a window half hour sells (instead of charging) only if the battery is above the floor by
+        # more than the house load, so an export it can't make doesn't stop the charge
+        sells = (exp[i] > 0 and sl.sched and not free_now
+                 and (kwh - sl.floor / 100 * cap) / sl.hours > sl.load_kw / eff + 0.05)
+        if (sl.sched or free_now) and not sells:
             kw = cfg.max_charge_kw
-            if sl.sched and not free_now and cfg.charge_mode == "spread":
+            full = sl.buyback in last_sell and i <= last_sell[sl.buyback]
+            if sl.sched and not free_now and cfg.charge_mode == "spread" and not full:
                 kw = spread = spread_charge_kw(cfg, kwh / cap * 100, sl.frm, sl.finish_by, spread)
             batt = min(kw, (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
             if free_now and not sl.cheap and not sl.sched:
@@ -373,7 +389,7 @@ def _simulate(
             if free_now:
                 free_kw = min(imp_kw, left[sl.free_id] / sl.hours)
                 left[sl.free_id] -= free_kw * sl.hours
-        elif sl.iog_h > 0:
+        elif sl.iog_h > 0 and not exp[i] > 0:  # (an export there rejects the dispatch)
             avail = max(0.0, tgt - kwh)
             batt = min(cfg.max_charge_kw * sl.iog_h, avail) / sl.hours
             rest_h = sl.hours - sl.iog_h
@@ -431,10 +447,11 @@ def _export_candidates(cfg: PlannerConfig, slots: list[_Slot]) -> list[int]:
     for i, sl in enumerate(slots):
         if sl.export_p is None:
             continue
-        if not (sl.charge or sl.saving or sl.iog_h > 0):
+        if not (sl.charge or sl.saving or (sl.iog_h > 0 and not cfg.reject_dispatch)):
             if sl.next_charge < len(slots):
                 out.append(i)
-        elif cfg.night_cycle and sl.sched and not sl.free and sl.end <= sl.finish_by:
+        elif cfg.night_cycle and sl.sched and not sl.free and not sl.car and sl.end <= sl.finish_by:
+            # (not while the car charges in a dispatch: it would take the export)
             out.append(i)
     return out
 

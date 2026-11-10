@@ -124,6 +124,30 @@ async def test_spread_current_in_charge_window(hass, octopus_states, freezer) ->
     assert float(val(hass, "sensor.battery_plan_target_grid_setpoint")) == 0
 
 
+async def test_full_current_in_window_with_buy_sell_buy(hass, octopus_states, freezer) -> None:
+    """With buy-sell-buy on, the window charges at full current rather than spread (40%: spread would be ~152 A)."""
+    hass.states.async_set("sensor.batt_soc", "40", {"device_class": "battery", "unit_of_measurement": "%"})
+    await setup(hass, freezer, control_opts(night_cycle=True), at=datetime(2026, 11, 4, 0, 0, tzinfo=timezone.utc))
+    assert float(val(hass, "sensor.battery_plan_target_charge_current")) == pytest.approx(17.6 * 1000 / 51.2, abs=0.1)
+
+
+async def test_rejected_dispatch_not_charged(hass, octopus_states, freezer) -> None:
+    """A dispatch the plan rejects for an export: the charge schedule stays parked, the EV is inhibited."""
+    hass.states.async_set("sensor.batt_soc", "95", {"device_class": "battery", "unit_of_measurement": "%"})
+    hass.states.async_set(SCHED, "0", {"min": 0, "max": 100})
+    # 07:30-08:00 dispatch (fixture) with a 60p export then
+    from .conftest import rates
+    d0 = datetime(2026, 11, 4, tzinfo=timezone.utc)
+    hass.states.async_set("event.exp_current", "x", {"rates": rates(d0, [0.18] * 15 + [0.60] + [0.18] * 16 + [0.30] * 6 + [0.20] * 10)})
+    await setup(hass, freezer, control_opts(reject_dispatch=True, charge_schedule_soc_entity=SCHED,
+                                            ev_allow_entity="input_boolean.zappi_allow"),
+                at=datetime(2026, 11, 4, 7, 35, tzinfo=timezone.utc))
+    st = hass.states.get("sensor.battery_plan_control_status").attributes
+    assert st["mode"] == "export", st
+    assert float(val(hass, "sensor.battery_plan_target_charge_soc")) == 0
+    assert val(hass, "binary_sensor.battery_plan_ev_inhibit") == "on"
+
+
 async def test_heartbeat(hass, octopus_states, freezer) -> None:
     hass.config.components.add("mqtt")
     pub = async_mock_service(hass, "mqtt", "publish")

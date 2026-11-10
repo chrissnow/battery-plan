@@ -97,6 +97,7 @@
               "export_peak_import": "Buy at peak to export more",
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
+              "reject_dispatch": "Reject a dispatch for an export",
               "export_tracking": "Track SOC when exporting",
               "export_hold_minutes": "Hold the export for the last"
             },
@@ -109,7 +110,8 @@
               "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
-              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
+              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. The window then charges at full power (a spread charge leaves little time to buy back). To control it, the overnight charge must come from the charge schedule (see Control).",
+              "reject_dispatch": "May export in an Intelligent Octopus dispatch outside the charge window (e.g. one in the evening peak) instead of topping up, when that beats keeping the dispatch by the margin. The EV charger is inhibited while exporting, so the car doesn't charge then and Octopus usually reschedules. Dispatches inside the overnight window are always kept (buy-sell-buy doesn't sell in them). Needs the EV allow switch to stop the car; with the charge schedule SOC set it isn't raised in that dispatch.",
               "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power.",
               "export_hold_minutes": "Control only: in the last minutes of each half hour keep the export power as it is instead of tracking to the end (aiming at the end over a few minutes tapers off or surges). 0 tracks to the end."
             }
@@ -311,6 +313,7 @@
               "export_peak_import": "Buy at peak to export more",
               "buy_ahead_hours": "Buy in advance up to",
               "night_cycle": "Buy, sell and buy back overnight",
+              "reject_dispatch": "Reject a dispatch for an export",
               "export_tracking": "Track SOC when exporting",
               "export_hold_minutes": "Hold the export for the last"
             },
@@ -323,7 +326,8 @@
               "export_margin": "Export a kWh only when it earns at least this much more than keeping it would save (a smaller overnight recharge, house load not bought later, nothing ahead of a free session). Covers battery wear and forecast error; 4-5p is typical.",
               "export_peak_import": "Allow exports that leave the house buying at peak rate before the charge window, when the export still beats that by the margin. Bought afterwards first, then in advance.",
               "buy_ahead_hours": "How long before an export the house may run from grid, or the battery grid-charge, to export more. Nearest the export first; shorter means less is bought on a forecast.",
-              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. To control it, the overnight charge must come from the charge schedule (see Control).",
+              "night_cycle": "May export inside the overnight charge window (down to the night floor) and charge it back before the window ends, when that beats the margin. The window then charges at full power (a spread charge leaves little time to buy back). To control it, the overnight charge must come from the charge schedule (see Control).",
+              "reject_dispatch": "May export in an Intelligent Octopus dispatch outside the charge window (e.g. one in the evening peak) instead of topping up, when that beats keeping the dispatch by the margin. The EV charger is inhibited while exporting, so the car doesn't charge then and Octopus usually reschedules. Dispatches inside the overnight window are always kept (buy-sell-buy doesn't sell in them). Needs the EV allow switch to stop the car; with the charge schedule SOC set it isn't raised in that dispatch.",
               "export_tracking": "Control only: aim for the plan's SOC at the end of each export slot, adjusting for the live house load, instead of exporting a fixed power.",
               "export_hold_minutes": "Control only: in the last minutes of each half hour keep the export power as it is instead of tracking to the end (aiming at the end over a few minutes tapers off or surges). 0 tracks to the end."
             }

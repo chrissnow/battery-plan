@@ -285,7 +285,7 @@ class Controller:
         """Charge current limit (A): the spread rate inside the window or a dispatch (finishing
         the finish-early minutes before it ends), else the maximum."""
         cfg = c.cfg
-        if c.soc is None or c.finish is None or cfg.charge_mode != "spread":
+        if c.soc is None or c.finish is None or cfg.charge_mode != "spread" or self._window_sells_ahead(c):
             self._spread = self._topup_spread = None
             return round(c.max_a, 1)
         ah = self.coordinator.bms_capacity_ah(c.soc)
@@ -300,6 +300,26 @@ class Controller:
             kw = self._topup_spread = spread_charge_kw(spread_cfg, c.soc, c.now, c.topup, self._topup_spread)
         return round(kw * 1000 / c.volts, 1)
 
+    def _dispatch_now(self, now: datetime) -> bool:
+        """An IOG dispatch (planned or confirmed) covers now."""
+        for s_, e_ in (self.coordinator.data or {}).get("iog_dispatches") or []:
+            s, e = dt_util.parse_datetime(s_), dt_util.parse_datetime(e_)
+            if s and e and s <= now < e:
+                return True
+        return False
+
+    @staticmethod
+    def _window_sells_ahead(c: _Ctx) -> bool:
+        """Buy-sell-buy: the plan still sells in this charge window, so it charges at full power
+        until then (as the planner does), spread after its last export."""
+        if not (c.cfg.night_cycle and c.window_end and c.data):
+            return False
+        for f in c.data.get("forecast") or []:
+            t = dt_util.parse_datetime(f["t"])
+            if t and c.now < t <= c.window_end and f["mode"] in ("export", "saving"):
+                return True
+        return False
+
     def _charge_schedule_soc(self, c: _Ctx, slot: dict | None) -> float:
         """Target SOC for the charge schedule: raised to charge, else parked below the SOC."""
         cfg, park = c.cfg, c.park
@@ -312,6 +332,8 @@ class Controller:
                 i += 1
             return max(park, min(cfg.target_soc, float(math.ceil(peak))))
         if c.topup is not None:
+            if slot is not None and slot["mode"] in ("export", "saving"):
+                return park  # a dispatch the plan rejects for an export: don't charge in it
             return max(park, cfg.target_soc)  # dispatch: charge as the schedule would
         if c.window_end is not None and c.o.get(CONF_CHARGE_SOC_WINDOW):
             if slot is not None and slot["mode"] in ("export", "saving"):
@@ -430,8 +452,11 @@ class Controller:
         now = dt_util.utcnow()
         self.compute(now)
         in_window = charge_finish_by(self.coordinator.planner_config(), now, dt_util.get_default_time_zone()) is not None
+        # exporting: keep the EV from draining the battery. In the charge window only while no
+        # IOG dispatch is under way (buy-sell-buy), so the car's off-peak charging isn't blocked
         self.ev_inhibit = (
-            not self.fallback and self.setpoint_w is not None and self.setpoint_w <= EV_INHIBIT_W and not in_window
+            not self.fallback and self.setpoint_w is not None and self.setpoint_w <= EV_INHIBIT_W
+            and (not in_window or not self._dispatch_now(now))
         )
         o = self.coordinator.opts
         if self.setpoint_on:

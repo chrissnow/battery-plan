@@ -211,8 +211,20 @@ class BatteryPlanCard extends HTMLElement {
     const res = a.reserve_soc;
     let reserve = '';
     if (pts.length && pts[0].fl != null) {
-      // stepped floor (day/night) along the forecast
-      let d = `M${x(now)},${y(pts[0].fl)}`;
+      // stepped floor (day/night) along the forecast, and back over the history: the floor repeats
+      // daily, so a past half hour takes the forecast's value at the same time of day
+      const HH = 1800000, tod = t => { const dt = new Date(t); return dt.getHours() * 60 + dt.getMinutes(); };
+      const byTod = {};
+      pts.forEach((p, i) => { const s = i === 0 ? Math.floor(now / HH) * HH : pts[i - 1].t; if (!(tod(s) in byTod)) byTod[tod(s)] = p.fl; });
+      let d = '';
+      const p0 = Math.floor(t0 / HH) * HH;
+      for (let s = p0; s < now; s += HH) {
+        const f = byTod[tod(Math.floor(s / HH) * HH)];
+        if (f == null) continue;
+        const a0 = Math.max(s, t0), a1 = Math.min(s + HH, now);
+        d += `${d ? 'L' : 'M'}${x(a0)},${y(f)}L${x(a1)},${y(f)}`;
+      }
+      d += `${d ? 'L' : 'M'}${x(now)},${y(pts[0].fl)}`;
       pts.forEach((p, i) => { const s = i === 0 ? now : pts[i - 1].t; d += `L${x(s)},${y(p.fl)}L${x(p.t)},${y(p.fl)}`; });
       const lf = pts[pts.length - 1].fl;
       reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">exports stop at ${lf}%</text>`;

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -60,6 +60,7 @@ CONF_EXPORT_MARGIN = "export_margin"
 CONF_EXPORT_PEAK_IMPORT = "export_peak_import"
 CONF_BUY_AHEAD_H = "buy_ahead_hours"
 CONF_NIGHT_CYCLE = "night_cycle"
+CONF_REJECT_DISPATCH = "reject_dispatch"
 CONF_CHARGE_SOC_WINDOW = "charge_schedule_window"
 CONF_LIMITED_EXPORT_KW = "limited_export_kw"
 CONF_EXPORT_TRACKING = "export_tracking"
@@ -129,6 +130,7 @@ DEFAULTS: dict = {
     CONF_EXPORT_PEAK_IMPORT: False,
     CONF_BUY_AHEAD_H: 3,
     CONF_NIGHT_CYCLE: False,
+    CONF_REJECT_DISPATCH: False,
     CONF_CHARGE_SOC_WINDOW: False,
     CONF_EV_ALLOW_INVERT: False,
     CONF_MIN_SOC: 5,
@@ -204,6 +206,7 @@ SECTIONS: dict[str, list[str]] = {
         CONF_EXPORT_PEAK_IMPORT,
         CONF_BUY_AHEAD_H,
         CONF_NIGHT_CYCLE,
+        CONF_REJECT_DISPATCH,
         CONF_EXPORT_TRACKING,
         CONF_EXPORT_HOLD_MIN,
         CONF_DISCHARGE_EFF,
