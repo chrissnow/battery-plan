@@ -80,6 +80,8 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+RUN_RATE_P = 1.0  # export half hours within this of a run's first rate (p/kWh) share its tracking target
+
 STATUS_DISABLED = "disabled"
 STATUS_ACTIVE = "active"
 STATUS_FALLBACK = "fallback"
@@ -366,16 +368,25 @@ class Controller:
     @staticmethod
     def _export_run_end(c: _Ctx, slot: dict) -> dict:
         """The last half hour of the export run ``slot`` starts: following export half hours at
-        about the same planned power. Tracking to its end, not each half hour's, avoids tapering
-        off at every half-hour boundary and jumping back (and the writes that go with it), while
-        a run's smaller last half hour (often a lower price) keeps its own target."""
+        about the same planned power (within 0.5 kW) and export rate (within ``RUN_RATE_P`` of
+        the first). Tracking to its end, not each half hour's, avoids tapering off at every
+        half-hour boundary and jumping back (and the writes that go with it). A half hour paid
+        noticeably more or less, or planned at a different power (e.g. a run's smaller last half
+        hour), keeps its own target, so a forecast error still lands where the plan put it."""
         fc = (c.data or {}).get("forecast") or []
         try:
             i = fc.index(slot)
         except ValueError:
             return slot
         kw = float(slot.get("exp") or 0)
-        while i + 1 < len(fc) and fc[i + 1]["mode"] == "export" and abs(float(fc[i + 1].get("exp") or 0) - kw) <= 0.5:
+        rate = slot.get("rate")
+
+        def same(f: dict) -> bool:
+            if f["mode"] != "export" or abs(float(f.get("exp") or 0) - kw) > 0.5:
+                return False
+            return rate is None or f.get("rate") is None or abs(float(f["rate"]) - float(rate)) <= RUN_RATE_P
+
+        while i + 1 < len(fc) and same(fc[i + 1]):
             i += 1
         return fc[i]
 

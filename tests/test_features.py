@@ -43,13 +43,19 @@ def test_export_run_end() -> None:
     from types import SimpleNamespace
     from custom_components.battery_plan.control import Controller
 
-    f = lambda t, mode, exp, soc: {"t": t, "mode": mode, "exp": exp, "soc": soc}
-    fc = [f("17:00", "export", 11, 66), f("17:30", "export", 11, 54), f("18:00", "export", 10.8, 42),
-          f("18:30", "export", 11, 31), f("19:00", "export", 3.9, 25), f("19:30", "self", 0, 23)]
+    f = lambda t, mode, exp, soc, rate: {"t": t, "mode": mode, "exp": exp, "soc": soc, "rate": rate}
+    # 10 Nov: 38.08, 37.78, 37.76, 37.04p at 11 kW, then 3.9 kW at 36.77p
+    fc = [f("17:00", "export", 11, 66, 38.08), f("17:30", "export", 11, 54, 37.78), f("18:00", "export", 10.8, 42, 37.76),
+          f("18:30", "export", 11, 31, 37.04), f("19:00", "export", 3.9, 25, 36.77), f("19:30", "self", 0, 23, 28.34)]
     c = SimpleNamespace(data={"forecast": fc})
-    assert Controller._export_run_end(c, fc[0])["t"] == "18:30"
-    assert Controller._export_run_end(c, fc[4])["t"] == "19:00"
+    # 38.08 -> 37.76p is within 1p; 37.04p isn't (1.04p less): it starts its own run
+    assert Controller._export_run_end(c, fc[0])["t"] == "18:00"
+    assert Controller._export_run_end(c, fc[3])["t"] == "18:30"
+    assert Controller._export_run_end(c, fc[4])["t"] == "19:00"  # smaller last half hour: its own target
     assert Controller._export_run_end(SimpleNamespace(data={"forecast": []}), fc[0]) is fc[0]
+    # a half hour paid noticeably more ends the run before it, so a surplus isn't spread into it
+    peak = [f("17:00", "export", 11, 66, 30.0), f("17:30", "export", 11, 54, 30.5), f("18:00", "export", 11, 42, 38.0)]
+    assert Controller._export_run_end(SimpleNamespace(data={"forecast": peak}), peak[0])["t"] == "17:30"
 
 
 async def test_current_deadband(hass, octopus_states, freezer) -> None:
