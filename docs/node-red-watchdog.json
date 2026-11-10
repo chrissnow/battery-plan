@@ -3,7 +3,7 @@
   "id": "b1a7c0de00000001",
   "type": "group",
   "z": "5dcd501bec3e1b41",
-  "name": "Battery Plan watchdog: reset grid setpoint if HA control goes quiet",
+  "name": "Battery Plan watchdog: grid setpoint -50 W and DVCC max if HA control goes quiet",
   "style": {
    "label": true
   },
@@ -11,12 +11,14 @@
    "b1a7c0de00000002",
    "b1a7c0de00000003",
    "b1a7c0de00000004",
-   "b1a7c0de00000005"
+   "b1a7c0de00000005",
+   "b1a7c0de00000006",
+   "b1a7c0de00000007"
   ],
   "x": 54,
   "y": 2499,
   "w": 872,
-  "h": 122
+  "h": 162
  },
  {
   "id": "b1a7c0de00000002",
@@ -45,7 +47,7 @@
   "type": "trigger",
   "z": "5dcd501bec3e1b41",
   "g": "b1a7c0de00000001",
-  "name": "no 'on' for 2 min \u2192 -50 W ('off' cancels)",
+  "name": "no 'on' for 2 min \u2192 fire once ('off' cancels)",
   "op1": "",
   "op2": "-50",
   "op1type": "nul",
@@ -63,7 +65,8 @@
   "wires": [
    [
     "b1a7c0de00000004",
-    "b1a7c0de00000005"
+    "b1a7c0de00000005",
+    "b1a7c0de00000006"
    ]
   ]
  },
@@ -108,6 +111,54 @@
   "statusType": "auto",
   "x": 780,
   "y": 2580,
+  "wires": []
+ },
+ {
+  "id": "b1a7c0de00000006",
+  "type": "change",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "name": "DVCC max (A): max charge kW / battery V",
+  "rules": [
+   {
+    "t": "set",
+    "p": "payload",
+    "pt": "msg",
+    "to": "344",
+    "tot": "num"
+   }
+  ],
+  "x": 520,
+  "y": 2620,
+  "wires": [
+   [
+    "b1a7c0de00000007"
+   ]
+  ]
+ },
+ {
+  "id": "b1a7c0de00000007",
+  "type": "victron-output-ess",
+  "z": "5dcd501bec3e1b41",
+  "g": "b1a7c0de00000001",
+  "outputs": 0,
+  "service": "com.victronenergy.settings",
+  "path": "/Settings/SystemSetup/MaxChargeCurrent",
+  "serviceObj": {
+   "service": "com.victronenergy.settings",
+   "name": "Venus settings",
+   "communityTag": "ess"
+  },
+  "pathObj": {
+   "path": "/Settings/SystemSetup/MaxChargeCurrent",
+   "type": "float",
+   "name": "DVCC Charge current limit (A)",
+   "mode": "both"
+  },
+  "name": "DVCC charge current",
+  "onlyChanges": false,
+  "x": 800,
+  "y": 2620,
   "wires": []
  }
 ]
