@@ -741,6 +741,7 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         "min_soc_ahead": min(f["soc"] for f in forecast),
         "reserve_soc": floor_at(cfg, inp.now, inp.tz),
         "night_reserve_soc": cfg.reserve_soc,
+        "min_soc": min(cfg.min_soc, cfg.reserve_soc),  # the house may use the battery down to this
         "day_reserve_soc": cfg.day_reserve_soc,
         "capacity_kwh": _r(cap, 1),
         "charge_kw": _r(cfg.max_charge_kw, 2),

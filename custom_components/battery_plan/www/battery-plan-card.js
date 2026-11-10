@@ -198,9 +198,15 @@ class BatteryPlanCard extends HTMLElement {
       let d = `M${x(now)},${y(pts[0].fl)}`;
       pts.forEach((p, i) => { const s = i === 0 ? now : pts[i - 1].t; d += `L${x(s)},${y(p.fl)}L${x(p.t)},${y(p.fl)}`; });
       const lf = pts[pts.length - 1].fl;
-      reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">floor ${lf}%</text>`;
+      reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">export floor ${lf}%</text>`;
     } else if (res != null) {
-      reserve = `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">floor ${res}%</text>`;
+      reserve = `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">export floor ${res}%</text>`;
+    }
+    // the house may use the battery below the export floor, down to the minimum SOC
+    const minSoc = parseFloat(a.min_soc);
+    const floors = pts.filter(p => p.fl != null).map(p => p.fl).concat(res != null ? [res] : []);
+    if (!isNaN(minSoc) && minSoc > 0 && (!floors.length || minSoc < Math.min(...floors))) {
+      reserve += `<line x1="${L}" x2="${W - R}" y1="${y(minSoc)}" y2="${y(minSoc)}" class="min"/><text x="${W - R - 4}" y="${y(minSoc) + 12}" text-anchor="end" class="lbl">min ${minSoc}%</text>`;
     }
 
     const hist = this._hist.filter(h => h[0] >= t0);
@@ -274,6 +280,7 @@ class BatteryPlanCard extends HTMLElement {
         .lbl { fill: var(--secondary-text-color); font-size: 11px; }
         .lbl.b { font-weight: 600; fill: var(--primary-text-color); }
         .res { stroke: var(--error-color, #ef4444); stroke-dasharray: 6 5; stroke-width: 1.2; opacity: .7; }
+        .min { stroke: var(--secondary-text-color, #888); stroke-dasharray: 2 4; stroke-width: 1.2; opacity: .8; }
         .now { stroke: var(--primary-text-color); stroke-width: 1; opacity: .5; }
         .hist { fill:none; stroke: var(--primary-text-color, #444); stroke-width: 2; opacity: .55; }
         .fc { fill:none; stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; stroke-linejoin: round; }
