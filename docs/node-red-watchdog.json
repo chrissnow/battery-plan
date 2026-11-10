@@ -21,12 +21,13 @@
    "b1a7c0de00000004",
    "b1a7c0de00000005",
    "b1a7c0de00000006",
-   "b1a7c0de00000007"
+   "b1a7c0de00000007",
+   "b1a7c0de00000008"
   ],
   "x": 34,
   "y": 19,
   "w": 872,
-  "h": 162
+  "h": 202
  },
  {
   "id": "b1a7c0de00000002",
@@ -167,6 +168,17 @@
   "onlyChanges": false,
   "x": 800,
   "y": 140,
+  "wires": []
+ },
+ {
+  "id": "b1a7c0de00000008",
+  "type": "comment",
+  "z": "b1a7c0de00000000",
+  "g": "b1a7c0de00000001",
+  "name": "Set the DVCC value for your system: max charge kW x 1000 / battery V (344 A = 17.6 kW at 51.2 V)",
+  "info": "The watchdog writes this once if Battery Plan's heartbeat stops for 2 minutes, with the grid setpoint at -50 W. Use Battery Plan's maximum charge power and battery voltage settings.",
+  "x": 330,
+  "y": 180,
   "wires": []
  }
 ]

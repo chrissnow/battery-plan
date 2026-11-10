@@ -215,9 +215,9 @@ class BatteryPlanCard extends HTMLElement {
       let d = `M${x(now)},${y(pts[0].fl)}`;
       pts.forEach((p, i) => { const s = i === 0 ? now : pts[i - 1].t; d += `L${x(s)},${y(p.fl)}L${x(p.t)},${y(p.fl)}`; });
       const lf = pts[pts.length - 1].fl;
-      reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">export floor ${lf}%</text>`;
+      reserve = `<path d="${d}" class="res" fill="none"/><text x="${W - R - 4}" y="${y(lf) - 4}" text-anchor="end" class="lbl">exports stop at ${lf}%</text>`;
     } else if (res != null) {
-      reserve = `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">export floor ${res}%</text>`;
+      reserve = `<line x1="${L}" x2="${W - R}" y1="${y(res)}" y2="${y(res)}" class="res"/><text x="${W - R - 4}" y="${y(res) - 4}" text-anchor="end" class="lbl">exports stop at ${res}%</text>`;
     }
     // the house may use the battery below the export floor, down to the minimum SOC
     const minSoc = parseFloat(a.min_soc);

@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.4**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.5**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -63,7 +63,9 @@ Test gotchas learned the hard way:
 | File | What it does |
 |:--|:--|
 | `planner.py` | Pure planner (no HA imports). Half-hour slots over 36 h: charge window (max or DVCC-style spread with finish-early/make-up/5 % hysteresis), IOG dispatch top-ups, free/Power Up/saving sessions, day/night export floor, weather load per slot, inverter output limit. Exports: `_ExportSearch` keeps a kWh only if the whole simulated plan gains at least `export_margin` p/kWh (best price first, 0.5 kW steps, bisected); optional buying at peak (afterwards, then holds/grid charge within `buy_ahead_h`), optional buy-sell-buy inside the window (refilled by the finish-early time). `offpeak_window()` reads the daily off-peak period from import rates. Output: `forecast` (keys `t soc kw exp ik ek mode rate ip ld fl` + `wh wc tf`), `plan` blocks, `days` costs, `free_sessions`. Originally ported from a Node-RED `planner.js`. |
-| `coordinator.py` | Reads HA state, runs the planner every 5 min / on rate or dispatch change. Dispatches = planned + confirmed half hours. Load profile (7-day half-hourly mean from 5-min/hourly statistics, minus excluded sensors; masks IOG dispatches, grid charging and Octoplus sessions outside the charge window, bridges slots masked every day). Charge window from the import rates' off-peak period (option) or inverter schedule entities, target from the schedule SOC entity (`schedule()`), BMS capacity from consumed Ah. Weather model fit/forecast plumbing. Free-session import used so far. `CostTracker`: actual costs from the Energy dashboard's cost statistics (preferred, confirmed dispatch half hours re-priced) or grid power × live rates. |
+| `coordinator.py` | Reads HA state, runs the planner every 5 min / on rate or dispatch change. Dispatches = planned + confirmed half hours. Charge window from the import rates' off-peak period (option) or inverter schedule entities, target from the schedule SOC entity (`schedule()`), BMS capacity from consumed Ah. Free-session import used so far. `CostTracker`: actual costs from the Energy dashboard's cost statistics (preferred, confirmed dispatch half hours re-priced) or grid power × live rates. |
+| `load_inputs.py` | `LoadInputsMixin` (the coordinator inherits it): load profile (7-day half-hourly mean from 5-min/hourly statistics, minus excluded sensors; masks IOG dispatches, grid charging and Octoplus sessions outside the charge window, bridges slots masked every day) and the weather model's fit/forecast plumbing. Moved out of `coordinator.py` unchanged. |
+| `helpers.py` | `_as_dt`, `_float`, `_secs`, `BAD` (shared parsing helpers). |
 | `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points, temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
 | `control.py` | `Controller`: every 30 s `compute()` builds a `_Ctx`, then `_charge_current` (spread in the window; spread during IOG top-ups to finish 15 min early; BMS capacity; planned rate in free sessions and charges bought ahead), `_charge_schedule_soc` (target for an all-day ESS schedule: raised for dispatches/free sessions/bought-ahead charges and optionally the window, else parked), `_setpoint` (SOC-tracking exports per half hour, held for the last minutes; overrides, export floor, saving sessions, hold = live load, idle/charge setpoints). Two independent switches (`setpoint_on`, `current_on`), configurable deadbands, revert on switch-off/unload/HA stop, EV inhibit relay, MQTT heartbeat. |
 | `sensor.py` | Plan sensors, cost sensors, control target/status sensors, battery action sensor (history drives the card's past bands), weather load today/tomorrow, heating sensitivity. Large attributes are in `BIG` (`_unrecorded_attributes`). |
@@ -164,17 +166,15 @@ Test gotchas learned the hard way:
 
 1. Charge schedule SOC control live (check "Self-consumption above limit" first), then the
    watchdog for it.
-2. Optional: move the load profile and weather-input code out of `coordinator.py`
-   (about 330 lines) as a pure move.
-3. **Heating shift** to off-peak: dropped for now (conflicts with weather-compensation
+2. **Heating shift** to off-peak: dropped for now (conflicts with weather-compensation
    efficiency gains; backtest £39–71/yr for 2–4 kWh/day).
-4. **Efficiency calibration** from Victron AC/DC energy counters. A 4-week DC round trip
+3. **Efficiency calibration** from Victron AC/DC energy counters. A 4-week DC round trip
    was about 93 %; the planner assumes 0.93 × 0.90.
-5. **Solar**: needs a solar forecast in the planner (Solcast/Forecast.Solar).
-6. Optional weekday/weekend load split (backtest: worse than plain 7-day for now).
-7. Weather model: a night/day sensitivity split didn't predict held-back days better than
+4. **Solar**: needs a solar forecast in the planner (Solcast/Forecast.Solar).
+5. Optional weekday/weekend load split (backtest: worse than plain 7-day for now).
+6. Weather model: a night/day sensitivity split didn't predict held-back days better than
    the shared one; recheck with more cold-weather data. Optional cooling.
-8. Overnight export value: an annual backtest gave about £60/yr for buy-sell-buy; worthless
+7. Overnight export value: an annual backtest gave about £60/yr for buy-sell-buy; worthless
    when overnight export is 5–9p (the margin handles that).
 
 ## Useful facts

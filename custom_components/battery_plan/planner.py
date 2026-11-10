@@ -93,7 +93,6 @@ class PlannerInputs:
     import_rates: list[Rate] = field(default_factory=list)
     dispatches: list[tuple[datetime, datetime]] = field(default_factory=list)
     saving_session: tuple[datetime, datetime] | None = None
-    free_session: tuple[datetime, datetime] | None = None  # one session (or use free_sessions)
     free_sessions: list[tuple[datetime, datetime]] = field(default_factory=list)
     free_used_kwh: float = 0.0  # grid import so far in the (capped) free session in progress
     power_up_sessions: list[tuple[datetime, datetime]] = field(default_factory=list)  # uncapped
@@ -256,7 +255,7 @@ def free_sessions(cfg: PlannerConfig, inp: PlannerInputs) -> list[tuple[datetime
     Free-electricity sessions are capped at ``free_cap_kwh`` each; Power Ups aren't."""
     now = inp.now.astimezone(timezone.utc)
     cap = cfg.free_cap_kwh if cfg.free_cap_kwh > 0 else math.inf
-    wins = list(inp.free_sessions) or ([inp.free_session] if inp.free_session else [])
+    wins = list(inp.free_sessions)
     # the Octopus integration lists the capped weekend hours in its Power Up calendar too:
     # one with the same times as a free session is that session, so it keeps the cap
     same = {(s, e) for s, e in wins}
