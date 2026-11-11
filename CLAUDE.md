@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.7**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.8**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -84,6 +84,12 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.6.8: planned actions table layout (card only)
+
+- Rows: action → end SOC with the time underneath; columns Battery (what charging costs or
+  exporting earns), House (the house's own grid electricity) and Grid (battery + house across
+  the meter), each with its kWh underneath (grid net in/out). Hold reads "Hold (house on grid)".
 
 ## 0.6.7: peak buying only above the import price; planned actions; weather section
 

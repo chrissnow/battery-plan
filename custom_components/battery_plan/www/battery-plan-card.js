@@ -5,7 +5,7 @@
 // With the planner's weather model on, a load strip shows base load + heating/cooling and the forecast temperature.
 const BP_COLORS = { charge: '#3b82f6', iog: '#14b8a6', export: '#f59e0b', saving: '#eab308', grid: '#ef4444' };
 const BP_HEAT = '#f97316', BP_COOL = '#0ea5e9', BP_BASE = '#94a3b8';
-const BP_NAMES = { charge: 'Charge', iog: 'IOG top-up', export: 'Export', saving: 'Saving session', grid: 'Battery at min', hold: 'Hold', self: 'House on battery' };
+const BP_NAMES = { charge: 'Charge', iog: 'IOG top-up', export: 'Export', saving: 'Saving session', grid: 'Battery at min', hold: 'Hold (house on grid)', self: 'House on battery' };
 
 class BatteryPlanCard extends HTMLElement {
   static getConfigForm() {
@@ -139,30 +139,44 @@ class BatteryPlanCard extends HTMLElement {
   }
 
   _actionsTable(a) {
-    // the plan's blocks with what each one earns or costs (export earnings less import, house
-    // load included), from the half-hour forecast; '*' where some import isn't priced yet
-    const plan = a.plan || [], fc = (a.forecast || []).map(f => ({ ...f, t: Date.parse(f.t) }));
+    // the plan's blocks with what the battery's action earns or costs (export earnings less the
+    // import that charges it) and the grid's net in the block (all export earnings less all import,
+    // house load included), from the half-hour forecast; '*' where some import isn't priced yet
+    const plan = a.plan || [], now = Date.now();
+    const fc = (a.forecast || []).map(f => ({ ...f, t: Date.parse(f.t) }));
+    fc.forEach((f, i) => { f.h = Math.max(0, (f.t - (i ? fc[i - 1].t : now)) / 3600000); });
     if (!plan.length) return '';
     const cur = (this._hass.config && this._hass.config.currency) || 'GBP';
+    const money = v => `${v >= 0.005 ? '+' : (v <= -0.005 ? '−' : '')}${this._money(Math.abs(v), cur)}`;
+    const cls = v => (v >= 0.005 ? 'pos' : (v <= -0.005 ? 'neg' : ''));
     let anyUn = false;
     const rows = plan.map(b => {
       const s = Date.parse(b.start), e = Date.parse(b.end);
-      let v = 0, un = false;
+      let bat = 0, house = 0, grid = 0, hkwh = 0, gkwh = 0, un = false;
       fc.forEach(f => {
         if (f.t > s && f.t <= e) {
-          if (f.ik > 0 && f.ip == null) un = true;
-          v += (f.ek || 0) * (f.rate || 0) / 100 - (f.ik || 0) * (f.ip || 0) / 100;
+          const ik = f.ik || 0, ip = (f.ip || 0) / 100;
+          if (ik > 0 && f.ip == null) un = true;
+          const hk = Math.min(ik, (f.ld || 0) * f.h);  // import feeding the house
+          const earn = (f.ek || 0) * (f.rate || 0) / 100;
+          grid += earn - ik * ip;
+          house -= hk * ip;
+          hkwh += hk;
+          gkwh += ik - (f.ek || 0);
+          bat += earn - (ik - hk) * ip;
         }
       });
       anyUn = anyUn || un;
-      const sign = v >= 0.005 ? '+' : (v <= -0.005 ? '−' : '');
       const when = `${this._fmtTime(s, true)}–${this._fmtTime(e)}`;
       const sw = BP_COLORS[b.mode] ? `<i class="sw" style="background:${BP_COLORS[b.mode]}"></i>` : '';
-      return `<tr><td>${sw}${BP_NAMES[b.mode] || b.mode}<small>${when}</small></td><td>${b.kwh.toFixed(1)} kWh</td><td>${b.end_soc}%</td>
-        <td class="${v >= 0.005 ? 'pos' : (v <= -0.005 ? 'neg' : '')}">${sign}${this._money(Math.abs(v), cur)}${un ? '*' : ''}</td></tr>`;
+      const star = un ? '*' : '';
+      const k = v => `<small>${Math.abs(v).toFixed(1)} kWh</small>`;
+      const gdir = gkwh > 0.05 ? ' in' : (gkwh < -0.05 ? ' out' : '');
+      return `<tr><td>${sw}${BP_NAMES[b.mode] || b.mode} → ${Math.round(b.end_soc)}%<small>${when}</small></td>
+        <td class="${cls(bat)}">${money(bat)}${star}${k(b.kwh)}</td><td>${money(house)}${star}${k(hkwh)}</td><td class="${cls(grid)}">${money(grid)}${star}${k(gkwh).replace(' kWh<', ` kWh${gdir}<`)}</td></tr>`;
     }).join('');
-    const note = `Value: export earnings less import cost in the block, house load included.${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
-    return `<table class="cost acts"><thead><tr><th>Planned actions</th><th>Energy</th><th>End SOC</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table><div class="note">${note}</div>`;
+    const note = `→ SOC at the end. Battery: what charging costs or exporting earns. House: the house’s grid electricity (none while the battery runs it). Grid: battery + house across the meter. Energy under each amount.${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
+    return `<table class="cost acts"><thead><tr><th>Planned actions</th><th>Battery</th><th>House</th><th>Grid</th></tr></thead><tbody>${rows}</tbody></table><div class="note">${note}</div>`;
   }
 
   _costTable(a) {
@@ -356,6 +370,7 @@ class BatteryPlanCard extends HTMLElement {
         td.pos { color: var(--success-color, #16a34a); font-weight: 600; }
         td.neg { color: var(--error-color, #dc2626); font-weight: 600; }
         table.cost td small.wx { display:block; color: ${BP_HEAT}; }
+        table.acts td small { color: var(--secondary-text-color, #727272); font-weight: 400; }
         table.acts i.sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align: baseline; }
         .note { font-size: 11px; color: var(--secondary-text-color); margin-top: 4px; }
         svg.strip { margin-top: 2px; }
