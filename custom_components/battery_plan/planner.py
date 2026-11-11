@@ -48,6 +48,9 @@ class PlannerConfig:
     day_reserve_start: int = 5 * 3600 + 25 * 60  # seconds after local midnight
     day_reserve_end: int = 22 * 3600 + 25 * 60
     min_soc: float = 5.0
+    # the inverter's own minimum (e.g. Victron ESS minimum SoC), if below min_soc: exports are
+    # chosen to end at min_soc, but the forecast and costs let the house carry on down to this
+    hard_min_soc: float | None = None
     charge_start: int = 23 * 3600 + 1800  # seconds after local midnight
     charge_duration: int = 6 * 3600  # seconds
     charge_mode: str = "spread"  # "spread" or "max"
@@ -658,11 +661,18 @@ def _choose_exports(
 
 def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
     """Run the planner and return a JSON-serialisable result."""
+    if cfg.hard_min_soc is not None and cfg.hard_min_soc > cfg.min_soc:
+        cfg = replace(cfg, min_soc=cfg.hard_min_soc)  # the inverter stops higher: plan to that
     slots = build_slots(cfg, inp)
     firm = _firm_dispatches(inp) if cfg.dispatch_charges_battery else []
     search_slots = slots if firm == list(inp.dispatches) else build_slots(cfg, replace(inp, dispatches=firm))
     exp, buy = _choose_exports(cfg, inp, slots, search_slots)
-    rows = _simulate(cfg, inp, slots, exp, buy)
+    sim = cfg
+    if cfg.hard_min_soc is not None and cfg.hard_min_soc < min(cfg.min_soc, cfg.reserve_soc):
+        # min_soc is the plan's target; below it the battery still runs the house down to the
+        # inverter's minimum before importing, so that's what the forecast and costs show
+        sim = replace(cfg, min_soc=cfg.hard_min_soc)
+    rows = _simulate(sim, inp, slots, exp, buy)
     return _report(cfg, inp, slots, rows)
 
 
@@ -774,7 +784,8 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         "min_soc_ahead": min(f["soc"] for f in forecast),
         "reserve_soc": floor_at(cfg, inp.now, inp.tz),
         "night_reserve_soc": cfg.reserve_soc,
-        "min_soc": min(cfg.min_soc, cfg.reserve_soc),  # the house may use the battery down to this
+        "min_soc": min(cfg.min_soc, cfg.reserve_soc),  # the plan aims to end no lower than this
+        "hard_min_soc": cfg.hard_min_soc,  # the inverter's minimum: the house may use the battery down to it
         "day_reserve_soc": cfg.day_reserve_soc,
         "capacity_kwh": _r(cap, 1),
         "charge_kw": _r(cfg.max_charge_kw, 2),

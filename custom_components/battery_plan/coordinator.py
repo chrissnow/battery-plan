@@ -53,6 +53,7 @@ from .const import (
     CONF_MAX_EXPORT_KW,
     CONF_MIN_CHARGE_KW,
     CONF_MIN_SOC,
+    CONF_MIN_SOC_ENTITY,
     CONF_DAY_RESERVE_SOC,
     CONF_DAY_RESERVE_START,
     CONF_DAY_RESERVE_END,
@@ -162,6 +163,10 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         cfg_ah = float(self.opts[CONF_CAPACITY_KWH]) * 1000 / float(self.opts[CONF_BATTERY_VOLTAGE])
         return ah if 0.5 * cfg_ah <= ah <= 1.5 * cfg_ah else None
 
+    def _entity_float(self, eid: str | None) -> float | None:
+        st = self.hass.states.get(eid) if eid else None
+        return _float(st.state) if st else None
+
     def planner_config(self) -> P.PlannerConfig:
         o = self.opts
         lb = o.get(CONF_LONG_BALANCE_DAY, "none")
@@ -171,6 +176,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
             target_soc=sch["target"],
             reserve_soc=float(o[CONF_RESERVE_SOC]),
             min_soc=float(o[CONF_MIN_SOC]),
+            hard_min_soc=self._entity_float(o.get(CONF_MIN_SOC_ENTITY)),
             day_reserve_soc=_float(o.get(CONF_DAY_RESERVE_SOC)),
             day_reserve_start=_secs(o.get(CONF_DAY_RESERVE_START), "05:25:00"),
             day_reserve_end=_secs(o.get(CONF_DAY_RESERVE_END), "22:25:00"),
@@ -203,7 +209,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         o = self.opts
         ids: list[str] = [*o.get(CONF_IMPORT_RATES, []), *o.get(CONF_EXPORT_RATES, [])]
         for k in (CONF_DISPATCHING_ENTITY, CONF_TARGET_TIME_ENTITY, CONF_SCHEDULE_START_ENTITY,
-                  CONF_SCHEDULE_DURATION_ENTITY, CONF_SCHEDULE_SOC_ENTITY):
+                  CONF_SCHEDULE_DURATION_ENTITY, CONF_SCHEDULE_SOC_ENTITY, CONF_MIN_SOC_ENTITY):
             if o.get(k):
                 ids.append(o[k])
         return ids

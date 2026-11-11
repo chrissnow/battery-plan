@@ -20,6 +20,7 @@
               "target_soc": "Charge target",
               "reserve_soc": "Export floor (night)",
               "min_soc": "Minimum SOC",
+              "min_soc_entity": "Inverter minimum SOC entity",
               "day_reserve_soc": "Export floor (day)",
               "day_reserve_start": "Day floor from",
               "day_reserve_end": "Day floor until"
@@ -29,7 +30,8 @@
               "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
               "target_soc": "SOC the overnight charge aims for.",
               "reserve_soc": "Planned exports stop at this SOC; used outside the day window and at the start of the charge window.",
-              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid.",
+              "min_soc": "The plan aims to end no lower than this; without an inverter minimum SOC entity, the battery also stops discharging here and the house runs from grid.",
+              "min_soc_entity": "Optional: the inverter's own minimum (e.g. Victron ESS minimum SoC). If lower than the minimum SOC, the forecast and costs let the house use the battery down to it before buying from grid; exports still aim for the minimum SOC.",
               "day_reserve_soc": "Optional: a higher floor during the day (e.g. 25%), so daytime exports stop earlier.",
               "day_reserve_start": "When the day floor starts.",
               "day_reserve_end": "When the night floor takes over again."
@@ -243,6 +245,7 @@
               "target_soc": "Charge target",
               "reserve_soc": "Export floor (night)",
               "min_soc": "Minimum SOC",
+              "min_soc_entity": "Inverter minimum SOC entity",
               "day_reserve_soc": "Export floor (day)",
               "day_reserve_start": "Day floor from",
               "day_reserve_end": "Day floor until"
@@ -252,7 +255,8 @@
               "capacity_kwh": "Usable battery energy between 0 and 100% SOC.",
               "target_soc": "SOC the overnight charge aims for.",
               "reserve_soc": "Planned exports stop at this SOC; used outside the day window and at the start of the charge window.",
-              "min_soc": "Battery stops discharging below this (e.g. Victron ESS minimum SoC); the house then runs from grid.",
+              "min_soc": "The plan aims to end no lower than this; without an inverter minimum SOC entity, the battery also stops discharging here and the house runs from grid.",
+              "min_soc_entity": "Optional: the inverter's own minimum (e.g. Victron ESS minimum SoC). If lower than the minimum SOC, the forecast and costs let the house use the battery down to it before buying from grid; exports still aim for the minimum SOC.",
               "day_reserve_soc": "Optional: a higher floor during the day (e.g. 25%), so daytime exports stop earlier.",
               "day_reserve_start": "When the day floor starts.",
               "day_reserve_end": "When the night floor takes over again."

@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.9**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.10**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -28,7 +28,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 62 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 63 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -84,6 +84,14 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.6.10: inverter minimum SOC
+
+- `min_soc_entity` (optional, Battery section, e.g. the GX's ESS minimum SoC number): exports are
+  still chosen against `min_soc`, then the final simulation (forecast, costs, plan blocks) uses
+  the inverter's minimum if lower, as the battery really carries the house down to it (an evening
+  that reached 15 % at 23:00 showed ~1 kWh of peak import the battery would cover). Above
+  `min_soc` it replaces it for the whole plan. Plan publishes `hard_min_soc`.
 
 ## 0.6.9: planned actions energy (card only)
 

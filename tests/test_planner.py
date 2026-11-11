@@ -241,6 +241,22 @@ def test_no_peak_buying_below_the_import_price():
             assert _today(on) == pytest.approx(_today(off), abs=0.01), (soc, load)
 
 
+def test_hard_min_soc():
+    """Exports aim for min_soc; the forecast and costs let the house run on down to the inverter's minimum."""
+    peak_kwh = lambda r: sum(f["ik"] for f in _grid_before_window(r))
+    kw = dict(soc=30, exp_peak=0.10, exp_off=0.10, min_soc=15)
+    soft = _arb_plan(**kw)
+    hard = _arb_plan(hard_min_soc=10, **kw)
+    assert peak_kwh(hard) == pytest.approx(peak_kwh(soft) - 0.05 * 60 * 0.9, abs=0.05)  # 5% of 60 kWh
+    assert min(f["soc"] for f in hard["forecast"]) == pytest.approx(10, abs=0.1)
+    assert hard["min_soc"] == 15 and hard["hard_min_soc"] == 10
+    # exports are chosen against min_soc: the same with or without the inverter's minimum
+    arb = dict(min_soc=15)
+    assert _today(_arb_plan(hard_min_soc=10, **arb)) == pytest.approx(_today(_arb_plan(**arb)), abs=0.01)
+    # an inverter minimum above min_soc is where the battery really stops: the plan uses it
+    assert _arb_plan(hard_min_soc=18, **kw)["forecast"] == _arb_plan(**{**kw, "min_soc": 18})["forecast"]
+
+
 def test_buy_in_advance():
     bought = lambda r: [f for f in r["forecast"] if f["mode"] in ("hold", "charge") and "2026-11-04T12:30" <= f["t"] <= "2026-11-04T23:30"]
     # 50p peak vs 34.26p import: buying afterwards isn't enough to export at full power, so
