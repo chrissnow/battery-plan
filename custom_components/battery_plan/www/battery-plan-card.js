@@ -152,7 +152,7 @@ class BatteryPlanCard extends HTMLElement {
     let anyUn = false;
     const rows = plan.map(b => {
       const s = Date.parse(b.start), e = Date.parse(b.end);
-      let bat = 0, house = 0, grid = 0, hkwh = 0, gkwh = 0, un = false;
+      let bat = 0, house = 0, grid = 0, hkwh = 0, gkwh = 0, ekwh = 0, ckwh = 0, un = false;
       fc.forEach(f => {
         if (f.t > s && f.t <= e) {
           const ik = f.ik || 0, ip = (f.ip || 0) / 100;
@@ -163,6 +163,8 @@ class BatteryPlanCard extends HTMLElement {
           house -= hk * ip;
           hkwh += hk;
           gkwh += ik - (f.ek || 0);
+          ekwh += f.ek || 0;
+          ckwh += ik - hk;
           bat += earn - (ik - hk) * ip;
         }
       });
@@ -173,9 +175,9 @@ class BatteryPlanCard extends HTMLElement {
       const k = v => `<small>${Math.abs(v).toFixed(1)} kWh</small>`;
       const gdir = gkwh > 0.05 ? ' in' : (gkwh < -0.05 ? ' out' : '');
       return `<tr><td>${sw}${BP_NAMES[b.mode] || b.mode} → ${Math.round(b.end_soc)}%<small>${when}</small></td>
-        <td class="${cls(bat)}">${money(bat)}${star}${k(b.kwh)}</td><td>${money(house)}${star}${k(hkwh)}</td><td class="${cls(grid)}">${money(grid)}${star}${k(gkwh).replace(' kWh<', ` kWh${gdir}<`)}</td></tr>`;
+        <td class="${cls(bat)}">${money(bat)}${star}${k(Math.max(ekwh, ckwh))}</td><td>${money(house)}${star}${k(hkwh)}</td><td class="${cls(grid)}">${money(grid)}${star}${k(gkwh).replace(' kWh<', ` kWh${gdir}<`)}</td></tr>`;
     }).join('');
-    const note = `→ SOC at the end. Battery: what charging costs or exporting earns. House: the house’s grid electricity (none while the battery runs it). Grid: battery + house across the meter. Energy under each amount.${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
+    const note = `→ SOC at the end. Battery: what charging costs or exporting earns. House: the house’s grid electricity (none while the battery runs it). Grid: battery + house across the meter. Energy under each amount (Battery: kWh exported, or imported to charge it).${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
     return `<table class="cost acts"><thead><tr><th>Planned actions</th><th>Battery</th><th>House</th><th>Grid</th></tr></thead><tbody>${rows}</tbody></table><div class="note">${note}</div>`;
   }
 
