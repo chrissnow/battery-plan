@@ -466,7 +466,8 @@ class _ExportSearch:
     in the window, house load not bought at peak, or nothing if a free-electricity session
     refills the battery anyway. Every candidate is judged on the whole plan's value.
 
-    1. ``raise_exports``: best price first, each slot raised in 0.5 kW steps while the last
+    1. ``raise_exports``: best price first, each slot raised in 0.25 kWh steps (0.5 kW over a
+       half hour; larger in kW in the half hour under way) while the last
        step still clears the margin. Unless ``export_peak_import``, a step may not cause
        import outside the charge window, dispatches and free sessions.
     2. ``buy_ahead`` (with ``export_peak_import``): where an export still stops at the floor,
@@ -541,9 +542,13 @@ class _ExportSearch:
         for j in order:
             if exp[j] >= cfg.max_export_kw - 1e-6:
                 continue
+            # steps of the same energy in every slot (0.5 kW over a whole half hour): in the half
+            # hour under way a 0.5 kW step would be a sliver, and every replan would sell the bit of
+            # surplus too small for a step anywhere else there, at whatever it pays
+            step = self.STEP_KW * 0.5 / max(self.slots[j].hours, 1 / 60)
             levels = [exp[j]]
             while levels[-1] < cfg.max_export_kw - 1e-6:
-                levels.append(min(cfg.max_export_kw, levels[-1] + self.STEP_KW))
+                levels.append(min(cfg.max_export_kw, levels[-1] + step))
             cache: dict[int, tuple[float, float, float, float]] = {}
 
             def at(i: int) -> tuple[float, float, float, float]:

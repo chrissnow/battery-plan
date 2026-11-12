@@ -3,7 +3,7 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.10**.
+and an all-day ESS charge schedule's target SOC. Current version: **0.6.11**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -28,7 +28,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 63 tests, ~18 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 64 tests, ~23 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -84,6 +84,17 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.6.11: no sliver exports mid half hour; battery action settles
+
+- Export search steps are 0.25 kWh in every slot (0.5 kW over a whole half hour, more kW in the
+  half hour under way). With 0.5 kW steps, a replan part way through a half hour could sell a
+  leftover too small for a step anywhere else (load under the forecast) in the current half hour
+  at a poor price, and the controller's SOC tracking turned it into a 0.5-2.4 kW export to the
+  slot end (12 Nov: 13:16-13:30 and most other half hours, at ~15p with 27p in the evening).
+  Surplus too small for a step now stays in the battery.
+- Battery action sensor: a new state must last 30 s (`ACTION_SETTLE`). One meter reading of
+  ~0.6 kW export when a load switches off flipped it to export for 5 s (~20 times a day).
 
 ## 0.6.10: inverter minimum SOC
 

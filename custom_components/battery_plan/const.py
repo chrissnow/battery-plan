@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -117,6 +117,7 @@ CONF_BATTERY_POWER_INVERT = "battery_power_invert"
 CONF_USE_ENERGY_COSTS = "use_energy_costs"
 ACTION_ON_KW = 0.5
 ACTION_OFF_KW = 0.2
+ACTION_SETTLE = timedelta(seconds=30)  # a new battery action must last this long
 
 CHARGE_MODES = ["spread", "max"]
 WEEKDAYS = ["none", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]

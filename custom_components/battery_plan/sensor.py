@@ -23,7 +23,7 @@ from homeassistant.const import (
 )
 from homeassistant.const import EntityCategory
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -35,6 +35,7 @@ from .const import (
     CONF_CHARGE_SOC_ENTITY,
     ACTION_OFF_KW,
     ACTION_ON_KW,
+    ACTION_SETTLE,
     CONF_BATTERY_POWER_ENTITY,
     CONF_BATTERY_POWER_INVERT,
     CONF_DISPATCHING_ENTITY,
@@ -392,7 +393,9 @@ class ActionSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
     when the battery is charging - or, without a battery power sensor, when the
     plan says charge and the grid is importing; otherwise house on battery, or
     'grid' when the plan has the battery at its minimum. Thresholds have
-    hysteresis (on above 0.5 kW, off below 0.2 kW) so the state doesn't flap.
+    hysteresis (on above 0.5 kW, off below 0.2 kW) so the state doesn't flap, and
+    a new state must last ``ACTION_SETTLE`` (a load switching off shows as a few
+    hundred W of export for one meter reading before the ESS catches up).
     """
 
     _attr_has_entity_name = True
@@ -405,6 +408,20 @@ class ActionSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_battery_action"
         self._attr_device_info = device_info(entry)
         self._state: str | None = None
+        self._pending: tuple[str | None, datetime] | None = None  # (state, first seen)
+        self._recheck: Callable[[], None] | None = None
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._recheck:
+            self._recheck()
+            self._recheck = None
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _on_settle(self, _now: datetime) -> None:
+        self._recheck = None
+        if self._classify():
+            self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -465,8 +482,20 @@ class ActionSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
             new = "grid"
         else:
             new = "self"
+        if new == prev:
+            self._pending = None
+            return False
+        now = dt_util.utcnow()
+        if prev is not None and (grid is not None or batt is not None):
+            if self._pending is None or self._pending[0] != new:
+                self._pending = (new, now)
+            if now - self._pending[1] < ACTION_SETTLE:
+                if self._recheck is None:
+                    self._recheck = async_call_later(self.hass, ACTION_SETTLE, self._on_settle)
+                return False
+        self._pending = None
         self._state = new
-        return new != prev
+        return True
 
     @property
     def native_value(self) -> str | None:

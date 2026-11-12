@@ -165,17 +165,31 @@ async def test_battery_action(hass, octopus_states, freezer) -> None:
     a = "sensor.battery_plan_battery_action"
     assert val(hass, a) == "self"  # grid 2 kW import, battery -1.5 kW, plan says export
     assert hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes["action_entity"] == a
-    hass.states.async_set("sensor.grid_power", "-9000", {"device_class": "power", "unit_of_measurement": "W"})
+    w = {"device_class": "power", "unit_of_measurement": "W"}
+    # one meter reading of export (a load switching off) isn't an action
+    hass.states.async_set("sensor.grid_power", "-600", w)
     await hass.async_block_till_done()
-    assert val(hass, a) == "export"
-    hass.states.async_set("sensor.grid_power", "-300", {"device_class": "power", "unit_of_measurement": "W"})
+    await run(hass, freezer, 5)
+    hass.states.async_set("sensor.grid_power", "-50", w)
     await hass.async_block_till_done()
-    assert val(hass, a) == "export"  # hysteresis: still above 0.2 kW
-    hass.states.async_set("sensor.grid_power", "-100", {"device_class": "power", "unit_of_measurement": "W"})
-    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
     assert val(hass, a) == "self"
-    hass.states.async_set("sensor.batt_power", "9000", {"device_class": "power", "unit_of_measurement": "W"})
+    hass.states.async_set("sensor.grid_power", "-9000", w)
     await hass.async_block_till_done()
+    assert val(hass, a) == "self"  # not yet: must last 30 s
+    await run(hass, freezer, 31)
+    assert val(hass, a) == "export"
+    hass.states.async_set("sensor.grid_power", "-300", w)
+    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
+    assert val(hass, a) == "export"  # hysteresis: still above 0.2 kW
+    hass.states.async_set("sensor.grid_power", "-100", w)
+    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
+    assert val(hass, a) == "self"
+    hass.states.async_set("sensor.batt_power", "9000", w)
+    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
     assert val(hass, a) == "charge"
 
 

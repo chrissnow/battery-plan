@@ -428,3 +428,16 @@ def test_only_the_final_dispatch_is_firm():
     # without a ready time no dispatch is firm: nothing exported ahead of them
     assert before(_plan(exp, dispatches=[extra, final], **kw)) == 0
 
+
+
+def test_no_sliver_export_in_the_half_hour_under_way():
+    """Load came in under the forecast: what's left over is too little for an export step in the
+    evening's dear half hours (it would leave the house buying at peak). Mid-half-hour, a 0.5 kW step
+    in the half hour under way was small enough to take it, so every replan sold it there at 15p.
+    Kept in the battery instead: exports only go where a whole step goes."""
+    exp = [0.27 if 32 <= i < 38 else 0.15 for i in range(48)] * 2
+    now = D0 + timedelta(hours=13, minutes=16)
+    for soc in [40 + k * 0.4 for k in range(50)]:
+        res = _plan(exp, soc=soc, load=1.5, now=now, export_peak_import=True, min_soc=15, reserve_soc=20,
+                    day_reserve_soc=25)
+        assert res["forecast"][0]["ek"] == 0, soc
