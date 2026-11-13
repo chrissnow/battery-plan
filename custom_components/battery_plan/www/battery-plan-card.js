@@ -2,10 +2,12 @@
 // Actual SOC (history) + forecast SOC with charge/export bands, and a planned cost table.
 // Config: entity (the "SOC at next charge" sensor), soc_entity (optional, defaults to the planner's),
 //         hours_past (12), height (240), show_costs (true), show_load (true), show_actions (true), title.
-// With the planner's weather model on, a load strip shows base load + heating/cooling and the forecast temperature.
-const BP_COLORS = { charge: '#3b82f6', iog: '#14b8a6', export: '#f59e0b', saving: '#eab308', grid: '#ef4444' };
+// With the planner's weather model on, a load strip shows base load + heating/cooling and the forecast temperature;
+// with a solar forecast, the PV forecast is drawn over it.
+const BP_COLORS = { charge: '#3b82f6', iog: '#14b8a6', export: '#f59e0b', saving: '#eab308', grid: '#ef4444', solar: '#84cc16' };
+const BP_PV = '#ca8a04';
 const BP_HEAT = '#f97316', BP_COOL = '#0ea5e9', BP_BASE = '#94a3b8';
-const BP_NAMES = { charge: 'Charge', iog: 'IOG top-up', export: 'Export', saving: 'Saving session', grid: 'Battery at min', hold: 'Hold (house on grid)', self: 'House on battery' };
+const BP_NAMES = { charge: 'Charge', iog: 'IOG top-up', export: 'Export', saving: 'Saving session', grid: 'Battery at min', hold: 'Hold (house on grid)', self: 'House on battery', solar: 'Solar charge' };
 
 class BatteryPlanCard extends HTMLElement {
   static getConfigForm() {
@@ -175,9 +177,9 @@ class BatteryPlanCard extends HTMLElement {
       const k = v => `<small>${Math.abs(v).toFixed(1)} kWh</small>`;
       const gdir = gkwh > 0.05 ? ' in' : (gkwh < -0.05 ? ' out' : '');
       return `<tr><td>${sw}${BP_NAMES[b.mode] || b.mode} → ${Math.round(b.end_soc)}%<small>${when}</small></td>
-        <td class="${cls(bat)}">${money(bat)}${star}${k(Math.max(ekwh, ckwh))}</td><td>${money(house)}${star}${k(hkwh)}</td><td class="${cls(grid)}">${money(grid)}${star}${k(gkwh).replace(' kWh<', ` kWh${gdir}<`)}</td></tr>`;
+        <td class="${cls(bat)}">${money(bat)}${star}${k(b.mode === 'solar' ? b.kwh : Math.max(ekwh, ckwh))}</td><td>${money(house)}${star}${k(hkwh)}</td><td class="${cls(grid)}">${money(grid)}${star}${k(gkwh).replace(' kWh<', ` kWh${gdir}<`)}</td></tr>`;
     }).join('');
-    const note = `→ SOC at the end. Battery: what charging costs or exporting earns. House: the house’s grid electricity (none while the battery runs it). Grid: battery + house across the meter. Energy under each amount (Battery: kWh exported, or imported to charge it).${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
+    const note = `→ SOC at the end. Battery: what charging costs or exporting earns. House: the house’s grid electricity (none while the battery runs it). Grid: battery + house across the meter. Energy under each amount (Battery: kWh exported, or imported to charge it; solar: kWh the battery takes from PV).${anyUn ? ' * part of its import isn’t priced yet.' : ''}`;
     return `<table class="cost acts"><thead><tr><th>Planned actions</th><th>Battery</th><th>House</th><th>Grid</th></tr></thead><tbody>${rows}</tbody></table><div class="note">${note}</div>`;
   }
 
@@ -211,7 +213,8 @@ class BatteryPlanCard extends HTMLElement {
       const impKwh = `${d.import_kwh.toFixed(1)} kWh${un > 0 && !allUn ? `, ${un.toFixed(1)} unpriced` : ''}`;
       const netCell = un > 0 ? '<td title="Some import is unpriced (rates not published yet)">—</td>'
         : `<td class="${net >= 0 ? 'pos' : 'neg'}">${net >= 0 ? '+' : ''}${this._money(net, cur)}</td>`;
-      return `<tr><td>${label}${un > 0 ? ' <span title="Rates not published yet">*</span>' : ''}${wx}</td>
+      const pv = p.pv_kwh > 0.05 ? `<small class="pvk">PV ${p.pv_kwh.toFixed(1)} kWh${whole ? ' to come' : ''}</small>` : '';
+      return `<tr><td>${label}${un > 0 ? ' <span title="Rates not published yet">*</span>' : ''}${wx}${pv}</td>
         <td${split(act && act.import_cost, p.import_cost)}>${impCost}<small>${impKwh}</small></td>
         <td${split(act && act.export_value, p.export_value)}>${this._money(d.export_value, cur)}<small>${d.export_kwh.toFixed(1)} kWh</small></td>
         ${netCell}</tr>`;
@@ -293,12 +296,13 @@ class BatteryPlanCard extends HTMLElement {
 
     // ---- house load strip: base + heating/cooling bars, forecast temperature, actual load ----
     const wm = a.weather_model || null, wmOn = !!(wm && wm.status === 'active');
-    const showLoad = c.show_load && pts.some(p => p.ld != null);
+    const hasPv = pts.some(p => p.pv > 0.01);
+    const showLoad = c.show_load && (pts.some(p => p.ld != null) || hasPv);
     const LH = 96, LT = 6, LB = 8;
     let strip = '';
     if (showLoad) {
       const lh = (this._loadHist || []).filter(h => h[0] + 1800000 > t0 && h[0] < now);
-      const top = Math.max(1, ...pts.map(p => p.ld || 0), ...lh.map(h => h[1]));
+      const top = Math.max(1, ...pts.map(p => Math.max(p.ld || 0, p.pv || 0)), ...lh.map(h => h[1]));
       const nice = top <= 2 ? 2 : top <= 4 ? 4 : top <= 6 ? 6 : Math.ceil(top / 5) * 5;
       const ly = v => LT + (1 - v / nice) * (LH - LT - LB);
       let bars = '';
@@ -309,6 +313,14 @@ class BatteryPlanCard extends HTMLElement {
         if (wh > 0.01) bars += `<rect x="${x0}" y="${ly(base + wh)}" width="${w}" height="${ly(base) - ly(base + wh)}" fill="${BP_HEAT}" opacity=".75"/>`;
         if (wc > 0.01) bars += `<rect x="${x0}" y="${ly(base + wh + wc)}" width="${w}" height="${ly(base + wh) - ly(base + wh + wc)}" fill="${BP_COOL}" opacity=".75"/>`;
       });
+      let pvPath = '';
+      if (hasPv) {  // the solar forecast as a stepped outline over the load bars
+        pts.forEach((p, i) => {
+          const s0 = i === 0 ? now : pts[i - 1].t;
+          pvPath += `${pvPath ? 'L' : 'M'}${x(s0).toFixed(1)},${ly(p.pv || 0).toFixed(1)}L${x(p.t).toFixed(1)},${ly(p.pv || 0).toFixed(1)}`;
+        });
+        pvPath += `L${x(pts[pts.length - 1].t).toFixed(1)},${ly(0)}L${x(now).toFixed(1)},${ly(0)}Z`;
+      }
       let actual = '';
       if (lh.length) {
         actual = 'M' + lh.map(h => `${x(Math.max(h[0], t0)).toFixed(1)},${ly(h[1]).toFixed(1)}L${x(Math.min(h[0] + 1800000, now)).toFixed(1)},${ly(h[1]).toFixed(1)}`).join('L');
@@ -324,7 +336,7 @@ class BatteryPlanCard extends HTMLElement {
       let lgrid = '';
       for (const v of [0, nice / 2, nice]) lgrid += `<line x1="${L}" x2="${W - R}" y1="${ly(v)}" y2="${ly(v)}" class="g"/><text x="${L - 6}" y="${ly(v) + 4}" text-anchor="end" class="lbl">${v}</text>`;
       strip = `<svg class="strip" viewBox="0 0 ${W} ${LH}" preserveAspectRatio="none">
-          ${lgrid}${bars}<path d="${actual}" class="act"/><path d="${temp}" class="temp"/>${tlab}
+          ${lgrid}${bars}<path d="${pvPath}" class="pv"/><path d="${actual}" class="act"/><path d="${temp}" class="temp"/>${tlab}
           <text x="${L + 4}" y="${LT + 10}" class="lbl">kW</text>
           <line x1="${x(now)}" x2="${x(now)}" y1="${LT}" y2="${LH - LB}" class="now"/>
           <line class="cur2 now" x1="0" x2="0" y1="${LT}" y2="${LH - LB}" style="display:none"/>
@@ -334,6 +346,17 @@ class BatteryPlanCard extends HTMLElement {
     const kindWord = wm && wm.cooling_kw_per_c && !wm.heating_kw_per_c ? 'Cooling' : 'Heating';
     const wxLine = wmOn && (a.weather_load_today != null || a.weather_load_tomorrow != null)
       ? `<div class="wxl"><i style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord} adds ${a.weather_load_today != null ? a.weather_load_today.toFixed(1) + ' kWh today' : ''}${a.weather_load_today != null && a.weather_load_tomorrow != null ? ' · ' : ''}${a.weather_load_tomorrow != null ? a.weather_load_tomorrow.toFixed(1) + ' kWh tomorrow' : ''}</div>` : '';
+    const sol = a.solar || null;
+    let pvLine = '';
+    if (hasPv) {
+      const fk = (sol && sol.forecast_kwh) || {}, dk = Object.keys(fk).sort();
+      const today = new Date().toLocaleDateString('en-CA');
+      const parts = dk.filter(d => d >= today && fk[d] >= 0.05).slice(0, 2).map(d => `${fk[d].toFixed(1)} kWh ${d === today ? 'today' : 'tomorrow'}`);
+      const how = sol && sol.status === 'calibrated' ? ` (forecast × ${sol.bias.toFixed(2)}${Math.abs(sol.today_ratio - 1) > 0.02 ? `, today × ${sol.today_ratio.toFixed(2)}` : ''})`
+        : (sol && sol.status ? ` (${sol.status})` : '');
+      const tgt = a.plan_target_soc != null ? ` · overnight target ${Math.round(a.plan_target_soc)}%` : '';
+      pvLine = `<div class="wxl"><i style="background:${BP_PV}"></i>Solar ${parts.join(' · ')}${how}${tgt}</div>`;
+    }
     const model = wm ? this._modelSection(wm) : '';
 
     // the sensor's state is the SOC at the next charge (older planners put it in an attribute)
@@ -372,6 +395,8 @@ class BatteryPlanCard extends HTMLElement {
         td.pos { color: var(--success-color, #16a34a); font-weight: 600; }
         td.neg { color: var(--error-color, #dc2626); font-weight: 600; }
         table.cost td small.wx { display:block; color: ${BP_HEAT}; }
+        table.cost td small.pvk { display:block; color: ${BP_PV}; }
+        .pv { fill: ${BP_PV}; fill-opacity: .12; stroke: ${BP_PV}; stroke-width: 1.5; }
         table.acts td small { color: var(--secondary-text-color, #727272); font-weight: 400; }
         table.acts i.sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align: baseline; }
         .note { font-size: 11px; color: var(--secondary-text-color); margin-top: 4px; }
@@ -400,8 +425,8 @@ class BatteryPlanCard extends HTMLElement {
           ${strip}
           <div class="tip" id="tip"></div>
         </div>
-        <div class="leg"><span><i style="background:var(--primary-text-color,#444)"></i>Actual</span><span><i style="background:var(--primary-color,#03a9f4);opacity:1"></i>Forecast</span>${legend}${showLoad ? `<span><i class="sq" style="background:${BP_BASE}"></i>House load</span>${wmOn ? `<span><i class="sq" style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord}</span>` : ''}` : ''}</div>
-        ${wxLine}
+        <div class="leg"><span><i style="background:var(--primary-text-color,#444)"></i>Actual</span><span><i style="background:var(--primary-color,#03a9f4);opacity:1"></i>Forecast</span>${legend}${showLoad ? `<span><i class="sq" style="background:${BP_BASE}"></i>House load</span>${hasPv ? `<span><i class="sq" style="background:${BP_PV}"></i>Solar</span>` : ''}${wmOn ? `<span><i class="sq" style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord}</span>` : ''}` : ''}</div>
+        ${wxLine}${pvLine}
         ${c.show_costs ? this._costTable(a) : ''}
         ${c.show_actions ? this._actionsTable(a) : ''}
         ${model}
@@ -422,6 +447,7 @@ class BatteryPlanCard extends HTMLElement {
           const wx = (p.wh || 0) + (p.wc || 0);
           html += `<br>Load ${p.ld.toFixed(1)} kW${wx > 0.01 ? ` (${Math.max(0, p.ld - wx).toFixed(1)} base + ${wx.toFixed(1)} ${p.wc ? 'cooling' : 'heating'})` : ''}${p.tf != null ? ` · ${p.tf}°` : ''}`;
         }
+        if (p.pv > 0.01) html += `<br>Solar ${p.pv.toFixed(1)} kW${p.pk > 0.005 ? ` · ${p.pk.toFixed(2)} kWh spills to export` : ''}`;
       } else if (hist.length || (this._past || []).length) {
         let h = hist[0]; for (const q of hist) { if (q[0] <= t) h = q; else break; }
         const pa = (this._past || []).find(q => q[0] <= t && t < q[1]);

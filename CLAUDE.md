@@ -3,7 +3,8 @@
 Home Assistant custom integration (HACS). It plans a home battery's overnight charge and
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
-and an all-day ESS charge schedule's target SOC. Current version: **0.6.11**.
+and an all-day ESS charge schedule's target SOC. With a solar forecast it plans PV too and
+lowers the overnight target to leave room for the sun. Current version: **0.7.0**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -28,7 +29,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 64 tests, ~23 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 78 tests, ~40 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -65,6 +66,8 @@ Test gotchas learned the hard way:
 | `planner.py` | Pure planner (no HA imports). Half-hour slots over 36 h: charge window (max or DVCC-style spread with finish-early/make-up/5 % hysteresis), IOG dispatch top-ups, free/Power Up/saving sessions, day/night export floor, weather load per slot, inverter output limit. Exports: `_ExportSearch` keeps a kWh only if the whole simulated plan gains at least `export_margin` p/kWh (best price first, 0.5 kW steps, bisected); optional buying at peak (afterwards, then holds/grid charge within `buy_ahead_h`), optional buy-sell-buy inside the window (refilled by the finish-early time). `offpeak_window()` reads the daily off-peak period from import rates. Output: `forecast` (keys `t soc kw exp ik ek mode rate ip ld fl` + `wh wc tf`), `plan` blocks, `days` costs, `free_sessions`. Originally ported from a Node-RED `planner.js`. |
 | `coordinator.py` | Reads HA state, runs the planner every 5 min / on rate or dispatch change. Dispatches = planned + confirmed half hours. Charge window from the import rates' off-peak period (option) or inverter schedule entities, target from the schedule SOC entity (`schedule()`), BMS capacity from consumed Ah. Free-session import used so far. `CostTracker`: actual costs from the Energy dashboard's cost statistics (preferred, confirmed dispatch half hours re-priced) or grid power × live rates. |
 | `load_inputs.py` | `LoadInputsMixin` (the coordinator inherits it): load profile (7-day half-hourly mean from 5-min/hourly statistics, minus excluded sensors; masks IOG dispatches, grid charging and Octoplus sessions outside the charge window, bridges slots masked every day) and the weather model's fit/forecast plumbing. Moved out of `coordinator.py` unchanged. |
+| `solar.py` | Pure solar maths: energy-platform Wh/hour → kW per half hour (`slot_kw`), `calibrate` (bias = median actual/forecast, dull day = 20th percentile / bias, after ≥5 days), `nowcast` (rest of today from today's actual so far, weighted by the share of the day passed), `apply`. |
+| `solar_inputs.py` | `SolarInputsMixin`: the forecast from the chosen integration's `energy` platform (`async_get_solar_forecast`, as the Energy dashboard uses; cached 30 min), a Store of each day's forecast as it stood by 06:00 with that day's actual from the PV sensor's statistics (energy change, or power means), calibration and nowcast. Publishes the `solar` attribute. |
 | `helpers.py` | `_as_dt`, `_float`, `_secs`, `BAD` (shared parsing helpers). |
 | `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points, temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
 | `control.py` | `Controller`: every 30 s `compute()` builds a `_Ctx`, then `_charge_current` (spread in the window; spread during IOG top-ups to finish 15 min early; BMS capacity; planned rate in free sessions and charges bought ahead), `_charge_schedule_soc` (target for an all-day ESS schedule: raised for dispatches/free sessions/bought-ahead charges and optionally the window, else parked), `_setpoint` (SOC-tracking exports per half hour, held for the last minutes; overrides, export floor, saving sessions, hold = live load, idle/charge setpoints). Two independent switches (`setpoint_on`, `current_on`), configurable deadbands, revert on switch-off/unload/HA stop, EV inhibit relay, MQTT heartbeat. |
@@ -84,6 +87,38 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.7.0: solar
+
+- Solar section: `pv_forecast_entry` (a config entry with an `energy` platform: Forecast.Solar, Solcast,
+  ...), optional `pv_entity` (PV power or energy, for actuals), `pv_scale`, `pv_ac_coupled`, `pv_export`,
+  `pv_optimise_target`, `pv_risk`.
+- Planner: each slot has `pv_kw`. PV runs the house first; a surplus charges the battery (to 100 %,
+  not the grid-charge target), then is exported (`spill`) unless the export rate is below zero or
+  `pv_export` is off. A planned export sells the surplus first. DC PV: × `discharge_eff` to AC, into
+  the battery at 0.98; AC-coupled: into the battery at `charge_eff`. `inverter_kw`: AC-coupled PV's
+  export doesn't pass through the inverter, DC spill does. New mode `solar` (battery charging from PV).
+  Without PV the plan is byte-identical to 0.6.11 (checked on random plans).
+- Overnight target by cost (`_choose_target`): candidates from the configured target down to
+  max(reserve, min SOC, 10) in 5 % steps; each a whole plan (own exports), scored
+  (1 − `pv_risk`) × value(forecast) + `pv_risk` × value(forecast × dull), where value = exports − import
+  + end kWh at the cheapest import / charge_eff. Ties go to the higher target; the previous target is
+  kept unless another beats it by 2p; inside the window it's frozen (`window_target`). Only the next
+  window gets it. ~17 candidates × 2 ≈ 1 s per replan (executor). Output: `plan_target_soc`,
+  `target_scores`, `pv_dull`; forecast `pv` (kW) and `pk` (spill kWh); days `pv_kwh`.
+- Forecast error is learned, not guessed: the forecast as it stood by 06:00 each day is stored with the
+  PV sensor's actual; over 28 days, bias = median ratio (0.5-1.5), dull = 20th percentile / bias
+  (0.2-1.0), after 5 days (`pv_scale` and 0.7 until then, or always without a PV sensor). Today's
+  actual so far scales the rest of today. Attribute `solar`: status, bias, dull, today_ratio,
+  forecast_kwh per day.
+- Control: inside the charge window `planner_config()` uses the plan's target if lower (spread and
+  charge schedule SOC follow it); dispatch top-ups still use the configured target. The `solar` slot
+  gets the idle setpoint: the ESS charges from PV and feeds in the excess itself. Curtailing at a
+  negative export rate is planned but not driven (set the GX's feed-in limit).
+- Battery action `solar`: battery charging with no grid import, only when solar is configured.
+- Card: PV forecast over the load strip, PV kWh per day, solar line (forecast, calibration,
+  overnight target), solar-charge rows in planned actions.
+- Load sensors must measure gross house consumption (not grid import), or PV is counted twice.
 
 ## 0.6.11: no sliver exports mid half hour; battery action settles
 
@@ -228,7 +263,9 @@ Test gotchas learned the hard way:
    efficiency gains; backtest £39–71/yr for 2–4 kWh/day).
 3. **Efficiency calibration** from Victron AC/DC energy counters. A 4-week DC round trip
    was about 93 %; the planner assumes 0.93 × 0.90.
-4. **Solar**: needs a solar forecast in the planner (Solcast/Forecast.Solar).
+4. **Balancing rules** (separate task): force 100 % if the battery hasn't been full for N days, or
+   if the expected solar surplus is too small to fill it (James's flow: 6 days, 0.5 kWh).
+   Also: replay solar against an install with PV history (James's HA) vs a fixed target.
 5. Optional weekday/weekend load split (backtest: worse than plain 7-day for now).
 6. Weather model: a night/day sensitivity split didn't predict held-back days better than
    the shared one; recheck with more cold-weather data. Optional cooling.

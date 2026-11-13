@@ -40,6 +40,8 @@ from .const import (
     CONF_BATTERY_POWER_INVERT,
     CONF_DISPATCHING_ENTITY,
     CONF_GRID_POWER_ENTITY,
+    CONF_PV_ENTITY,
+    CONF_PV_FORECAST_ENTRY,
     CONF_GRID_POWER_INVERT,
     CONF_TARGET_TIME_ENTITY,
     DOMAIN,
@@ -51,7 +53,7 @@ from .planner import MODES
 
 # Big attributes stay out of the recorder database
 BIG = frozenset({"forecast", "plan", "days", "load_profile_kw", "iog_dispatches", "weather_model", "charge_window",
-                 "load_entities", "load_exclude"})
+                 "load_entities", "load_exclude", "solar", "target_scores"})
 
 
 def device_info(entry: BatteryPlanConfigEntry) -> DeviceInfo:
@@ -470,8 +472,14 @@ class ActionSensor(CoordinatorEntity[BatteryPlanCoordinator], SensorEntity):
             charging = on(batt, prev in ("charge", "iog"))
         else:
             charging = plan in ("charge", "iog") and on(grid, prev in ("charge", "iog"))
+        # the battery charging with no grid import behind it: PV (spilling to export or not)
+        o = self.coordinator.opts
+        has_pv = bool(o.get(CONF_PV_FORECAST_ENTRY) or o.get(CONF_PV_ENTITY))
+        solar = has_pv and batt is not None and on(batt, prev == "solar") and not on(grid, False)
         if grid is None and batt is None:
             new = plan  # no power sensors: mirror the plan
+        elif solar and plan not in ("charge", "iog"):
+            new = "solar"
         elif exporting:
             new = "saving" if plan == "saving" else "export"
         elif charging:

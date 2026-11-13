@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
@@ -17,6 +18,7 @@ from homeassistant.util import dt as dt_util
 from . import planner as P
 from .helpers import BAD, _as_dt, _float, _secs
 from .load_inputs import LoadInputsMixin
+from .solar_inputs import SolarInputsMixin
 from . import weather_load as W
 from .const import (
     CONF_CAPACITY_KWH,
@@ -40,6 +42,11 @@ from .const import (
     CONF_FREE_CALENDAR,
     CONF_FREE_CAP_KWH,
     CONF_POWER_UP_CALENDAR,
+    CONF_PV_AC_COUPLED,
+    CONF_PV_ENTITY,
+    CONF_PV_EXPORT,
+    CONF_PV_OPTIMISE,
+    CONF_PV_RISK,
     CONF_GRID_POWER_ENTITY,
     CONF_GRID_POWER_INVERT,
     CONF_USE_ENERGY_COSTS,
@@ -79,7 +86,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, Any]]):
+class BatteryPlanCoordinator(LoadInputsMixin, SolarInputsMixin, DataUpdateCoordinator[dict[str, Any]]):
     """Runs the plan every few minutes and on tariff/dispatch changes."""
 
     config_entry: ConfigEntry
@@ -98,6 +105,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         self._w_source = ""
         self._w_forecast: list[tuple[datetime, float]] = []
         self._w_forecast_at: datetime | None = None
+        self.plan_target: float | None = None  # the next window's target chosen with solar
         self.costs = CostTracker(hass, entry, self)
         self.action_entity_id: str | None = None
         from .control import Controller
@@ -167,7 +175,17 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         st = self.hass.states.get(eid) if eid else None
         return _float(st.state) if st else None
 
-    def planner_config(self) -> P.PlannerConfig:
+    def planner_config(self, configured: bool = False) -> P.PlannerConfig:
+        """Planner settings. For control (``configured`` False), inside the charge window the
+        target is the one the plan chose for it with solar, if lower than the configured one."""
+        cfg = self._planner_config()
+        if configured or self.plan_target is None or self.plan_target >= cfg.target_soc:
+            return cfg
+        if P.charge_finish_by(cfg, dt_util.utcnow(), dt_util.get_default_time_zone()) is None:
+            return cfg
+        return replace(cfg, target_soc=self.plan_target)
+
+    def _planner_config(self) -> P.PlannerConfig:
         o = self.opts
         lb = o.get(CONF_LONG_BALANCE_DAY, "none")
         sch = self.schedule()
@@ -202,6 +220,10 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
             charge_eff=float(o[CONF_CHARGE_EFF]),
             dispatch_charges_battery=bool(o[CONF_DISPATCH_CHARGES]),
             free_cap_kwh=_float(o.get(CONF_FREE_CAP_KWH), 16.0) or 0.0,
+            pv_ac_coupled=bool(o.get(CONF_PV_AC_COUPLED, False)),
+            pv_export=bool(o.get(CONF_PV_EXPORT, True)),
+            pv_optimise=bool(o.get(CONF_PV_OPTIMISE, True)),
+            pv_risk=_float(o.get(CONF_PV_RISK), 0.3),
         )
 
     def watched_entities(self) -> list[str]:
@@ -334,7 +356,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         soc = _float(st.state) if st else None
         if soc is None:
             raise UpdateFailed(f"Battery SOC {self.opts[CONF_SOC_ENTITY]} is unavailable")
-        cfg = self.planner_config()
+        cfg = self.planner_config(configured=True)
         imp = self.rates(self.opts.get(CONF_IMPORT_RATES, []))
         exp = self.rates(self.opts.get(CONF_EXPORT_RATES, []))
         disp = self.dispatches()
@@ -344,6 +366,10 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
         power_ups = await self._calendar_windows(self.opts.get(CONF_POWER_UP_CALENDAR), now)
         current = next((w for w in frees if w[0] <= now < w[1]), None)  # capped: count what it's used
         used = await self._grid_import_kwh(current[0], now) if current and cfg.free_cap_kwh > 0 else 0.0
+        pv, pv_dull = await self._pv_inputs(now)
+        # inside the charge window its target stays as chosen before it started
+        in_window = P.charge_finish_by(cfg, now, dt_util.get_default_time_zone()) is not None
+        frozen = self.plan_target if in_window and pv else None
         inp = P.PlannerInputs(
             now=now,
             tz=dt_util.get_default_time_zone(),
@@ -358,8 +384,15 @@ class BatteryPlanCoordinator(LoadInputsMixin, DataUpdateCoordinator[dict[str, An
             free_used_kwh=used,
             power_up_sessions=power_ups,
             ready=self.ready_time(now),
+            pv=pv,
+            pv_dull=pv_dull,
+            window_target=frozen,
+            prev_target=self.plan_target,
         )
         result = await self.hass.async_add_executor_job(P.plan, cfg, inp)
+        self.plan_target = result.get("plan_target_soc")
+        if self.pv_info is not None:
+            result["solar"] = self.pv_info
         result["load_profile_kw"] = inp.load_kw
         result["load_source"] = self._load_source
         result["charge_window"] = self.schedule()

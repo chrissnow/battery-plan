@@ -193,6 +193,22 @@ async def test_battery_action(hass, octopus_states, freezer) -> None:
     assert val(hass, a) == "charge"
 
 
+async def test_battery_action_solar(hass, octopus_states, freezer) -> None:
+    """With solar configured, the battery charging with no grid import behind it is PV."""
+    await setup(hass, freezer, control_opts() | {"pv_entity": "sensor.pv_power"})
+    a = "sensor.battery_plan_battery_action"
+    w = {"device_class": "power", "unit_of_measurement": "W"}
+    hass.states.async_set("sensor.grid_power", "-100", w)
+    hass.states.async_set("sensor.batt_power", "3000", w)
+    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
+    assert val(hass, a) == "solar"
+    hass.states.async_set("sensor.grid_power", "4000", w)  # now the grid charges it
+    await hass.async_block_till_done()
+    await run(hass, freezer, 31)
+    assert val(hass, a) == "charge"
+
+
 
 async def test_spread_during_iog_dispatch(hass, octopus_states, freezer) -> None:
     """07:30-08:00 dispatch at 95%: fill it, finishing 15 min early (07:45) rather than at full power."""

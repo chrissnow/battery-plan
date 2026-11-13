@@ -34,7 +34,11 @@ MODE_IOG = "iog"
 MODE_EXPORT = "export"
 MODE_SAVING = "saving"
 MODE_GRID = "grid"
-MODES = [MODE_SELF, MODE_CHARGE, MODE_HOLD, MODE_IOG, MODE_EXPORT, MODE_SAVING, MODE_GRID]
+MODE_SOLAR = "solar"  # house on battery, the battery charging from a solar surplus
+MODES = [MODE_SELF, MODE_CHARGE, MODE_HOLD, MODE_IOG, MODE_EXPORT, MODE_SAVING, MODE_GRID, MODE_SOLAR]
+PV_DC_EFF = 0.98  # DC-coupled PV (MPPT) into the battery
+TARGET_STEP = 5.0  # % steps of the overnight target the solar search tries
+TARGET_KEEP_GBP = 0.02  # a new target must beat the previous one by this much
 
 
 @dataclass
@@ -74,6 +78,11 @@ class PlannerConfig:
     dispatch_charges_battery: bool = True
     free_cap_kwh: float = 16.0  # free import per free-electricity session (0 = no cap)
     horizon_slots: int = 72
+    # solar: AC-coupled PV (on the inverter's AC side) or DC (MPPT on the battery)
+    pv_ac_coupled: bool = False
+    pv_export: bool = True  # a surplus the battery can't take is exported (unless the rate is negative)
+    pv_optimise: bool = True  # choose the next window's target by cost when there's a PV forecast
+    pv_risk: float = 0.3  # weight of the dull-day scenario in that choice
 
 
 @dataclass
@@ -107,6 +116,11 @@ class PlannerInputs:
     # weather-dependent load, per half-hour slot start (epoch):
     # (load adjustment kW, heating kW, cooling kW, forecast temperature)
     weather: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
+    # solar forecast: mean kW per half-hour slot start (epoch), already bias-corrected
+    pv: dict[int, float] = field(default_factory=dict)
+    pv_dull: float = 0.7  # a dull day as a fraction of the forecast (from its error history)
+    window_target: float | None = None  # the next window's target, if fixed (e.g. frozen inside it)
+    prev_target: float | None = None  # the target chosen last time (hysteresis)
 
 
 @dataclass
@@ -133,6 +147,8 @@ class _Slot:
     free_id: int | None = None  # which free session (they each have their own cap)
     cheap: bool = False  # import at the lowest rate seen (off-peak, or a dispatch priced so)
     car: bool = False  # an IOG dispatch (the car charging) overlaps this half hour
+    pv_kw: float = 0.0  # forecast solar, mean kW
+    tgt: float | None = None  # this window's charge target (%), if not the configured one
 
 
 def _rate_at(rates: list[Rate], t: datetime) -> float | None:
@@ -268,7 +284,7 @@ def free_sessions(cfg: PlannerConfig, inp: PlannerInputs) -> list[tuple[datetime
     return sorted(w for w in out if w[1] > now)
 
 
-def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
+def build_slots(cfg: PlannerConfig, inp: PlannerInputs, window_target: float | None = None) -> list[_Slot]:
     now = inp.now.astimezone(timezone.utc)
     epoch = now.timestamp()
     start0 = datetime.fromtimestamp(math.floor(epoch / 1800) * 1800, timezone.utc)
@@ -319,6 +335,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
                 import_gbp=imp_gbp,
                 free_id=free_id,
                 car=car,
+                pv_kw=max(0.0, float(inp.pv.get(int(s.timestamp()), 0.0))),
                 cheap=iog_h > 0 or (imp_gbp is not None and low is not None and imp_gbp <= low + 0.001),
             )
         )
@@ -335,11 +352,22 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs) -> list[_Slot]:
         j = i
         while j + 1 < len(slots) and slots[j + 1].sched and not slots[j + 1].free:
             j += 1
+        if window_target is not None:  # its own target (the finish-early time depends on it too)
+            wcfg = replace(cfg, target_soc=window_target)
+            for k in range(i, j + 1):
+                slots[k].tgt = window_target
+                slots[k].finish_by = charge_finish_by(wcfg, slots[k].start, inp.tz)
+        window_target = None  # only the next window
         ends = [k for k in range(i, j + 1) if slots[k].end <= slots[k].finish_by]
         for k in range(i, j + 1):
             slots[k].buyback = ends[-1] if ends else j
         i = j + 1
     return slots
+
+
+def _next_window(slots: list[_Slot]) -> int | None:
+    """Index of the first slot of the next (or current) charge window, if any."""
+    return next((i for i, sl in enumerate(slots) if sl.sched and not sl.free), None)
 
 
 def _simulate(
@@ -352,9 +380,9 @@ def _simulate(
     cap = cfg.capacity_kwh
     kwh = inp.soc / 100 * cap
     min_kwh = min(cfg.min_soc, cfg.reserve_soc) / 100 * cap
-    tgt = cfg.target_soc / 100 * cap
     eff = cfg.discharge_eff
     spread = inp.spread_kw
+    tcfg: dict[float, PlannerConfig] = {}  # configs for windows with their own target
     # free import left per session; the one in progress has used some already
     now = inp.now.astimezone(timezone.utc)
     frees = free_sessions(cfg, inp)
@@ -370,7 +398,30 @@ def _simulate(
                 last_sell[sl.buyback] = i
     rows = []
     for i, sl in enumerate(slots):
-        exp_kw = imp_kw = free_kw = 0.0
+        exp_kw = imp_kw = free_kw = spill = 0.0
+        tgt = (cfg.target_soc if sl.tgt is None else sl.tgt) / 100 * cap
+        # solar as the AC it can deliver (DC-coupled PV reaches the house through the inverter),
+        # and how much of an AC surplus ends up in the battery
+        if cfg.pv_ac_coupled:
+            pv_eq, k_in = sl.pv_kw, cfg.charge_eff
+        else:
+            pv_eq, k_in = sl.pv_kw * eff, PV_DC_EFF / eff
+        head = max(0.0, (cap - kwh) / sl.hours)  # solar may fill the battery, past the charge target
+        spill_ok = cfg.pv_export and (sl.export_p is None or sl.export_p >= 0)
+
+        def absorb(imp: float, batt: float) -> tuple[float, float, float]:
+            """House on grid: solar covers the import first, then charges the battery; the rest spills."""
+            imp -= pv_eq
+            sp = 0.0
+            if imp < 0:
+                s = -imp
+                imp = 0.0
+                add = min(s * k_in, max(0.0, head - batt))
+                batt += add
+                s -= add / k_in
+                sp = s if spill_ok else 0.0
+            return imp, batt, sp
+
         # a free session charges while it has free import left, or past that where import is off-peak
         # (less than the house load's worth left at peak: the battery runs the house instead)
         free_now = sl.free_id is not None and (sl.cheap or left[sl.free_id] > max(0.05, sl.load_kw * sl.hours))
@@ -382,13 +433,16 @@ def _simulate(
             kw = cfg.max_charge_kw
             full = sl.buyback in last_sell and i <= last_sell[sl.buyback]
             if sl.sched and not free_now and cfg.charge_mode == "spread" and not full:
-                kw = spread = spread_charge_kw(cfg, kwh / cap * 100, sl.frm, sl.finish_by, spread)
+                c = cfg if sl.tgt is None else tcfg.setdefault(sl.tgt, replace(cfg, target_soc=sl.tgt))
+                kw = spread = spread_charge_kw(c, kwh / cap * 100, sl.frm, sl.finish_by, spread)
             batt = min(kw, (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
             if free_now and not sl.cheap and not sl.sched:
                 # at peak: charge only with what's left of the free import after the house load
                 batt = min(batt, max(0.0, (left[sl.free_id] / sl.hours - sl.load_kw) * cfg.charge_eff))
-            mode = MODE_CHARGE if batt > 0 else MODE_HOLD
             imp_kw = batt / cfg.charge_eff + sl.load_kw
+            if pv_eq > 0:
+                imp_kw, batt, spill = absorb(imp_kw, batt)
+            mode = MODE_CHARGE if batt > 0 else MODE_HOLD
             if free_now:
                 free_kw = min(imp_kw, left[sl.free_id] / sl.hours)
                 left[sl.free_id] -= free_kw * sl.hours
@@ -396,17 +450,32 @@ def _simulate(
             avail = max(0.0, tgt - kwh)
             batt = min(cfg.max_charge_kw * sl.iog_h, avail) / sl.hours
             rest_h = sl.hours - sl.iog_h
-            imp_kw = batt / cfg.charge_eff + sl.load_kw * sl.iog_h / sl.hours
-            if rest_h > 0:
-                batt -= sl.load_kw / eff * rest_h / sl.hours
+            if pv_eq <= 0:
+                imp_kw = batt / cfg.charge_eff + sl.load_kw * sl.iog_h / sl.hours
+                if rest_h > 0:
+                    batt -= sl.load_kw / eff * rest_h / sl.hours
+            else:
+                f = sl.iog_h / sl.hours
+                imp_kw = batt / cfg.charge_eff + (sl.load_kw - pv_eq) * f
+                if imp_kw < 0:
+                    batt += -imp_kw * k_in
+                    imp_kw = 0.0
+                if rest_h > 0:
+                    net = sl.load_kw - pv_eq
+                    batt += (-net / eff if net >= 0 else -net * k_in) * rest_h / sl.hours
+                if batt > head:
+                    spill = (batt - head) / k_in if spill_ok else 0.0
+                    batt = head
             mode = MODE_IOG if kwh < tgt - 0.05 else MODE_HOLD
         elif buy and buy[i] is not None:
             # bought in advance for an export: the house runs from grid and the battery rests
             # (0) or grid-charges at up to buy[i] kW
             batt = min(buy[i], (tgt - kwh) / sl.hours) if kwh < tgt else 0.0
-            mode = MODE_CHARGE if batt > 0.05 else MODE_HOLD
             imp_kw = sl.load_kw + batt / cfg.charge_eff
-        else:
+            if pv_eq > 0:
+                imp_kw, batt, spill = absorb(imp_kw, batt)
+            mode = MODE_CHARGE if batt > 0.05 else MODE_HOLD
+        elif pv_eq <= 0:
             load_b = sl.load_kw / eff
             want = exp[i]
             if want > 0 and cfg.inverter_kw:
@@ -425,9 +494,49 @@ def _simulate(
                 mode = MODE_GRID
                 exp_kw = 0.0
                 imp_kw = max(0.0, sl.load_kw + batt * eff)
+        else:
+            # self-use with solar: it runs the house first; a surplus charges the battery (to 100%),
+            # then is exported. A planned export sells the surplus first, then the battery
+            net = sl.load_kw - pv_eq
+            want = exp[i]
+            if want > 0 and cfg.inverter_kw:
+                if cfg.pv_ac_coupled:  # AC-coupled solar's export doesn't pass through the inverter
+                    want = min(want, max(0.0, cfg.inverter_kw - max(0.0, net)) + max(0.0, -net))
+                else:
+                    want = min(want, max(0.0, cfg.inverter_kw - sl.load_kw))
+            room = max(0.0, (kwh - sl.floor / 100 * cap) / sl.hours)
+            if net >= 0:
+                load_b = net / eff
+                exp_b = min(want / eff, max(0.0, room - load_b)) if want > 0 else 0.0
+                exp_kw = exp_b * eff
+                batt = -(load_b + exp_b)
+            else:
+                s = -net
+                e1 = min(want, s) if want > 0 else 0.0
+                s -= e1
+                exp_b = min((want - e1) / eff, room) if want - e1 > 1e-9 else 0.0
+                exp_kw = e1 + exp_b * eff
+                batt = s * k_in - exp_b
+            if batt > head:
+                over = (batt - head) / k_in
+                batt = head
+                if spill_ok:
+                    spill = over
+                    if cfg.inverter_kw and not cfg.pv_ac_coupled:  # DC solar exports through the inverter
+                        spill = min(spill, max(0.0, cfg.inverter_kw - sl.load_kw - exp_kw))
+            if exp_kw > 0.05:
+                mode = MODE_SAVING if sl.saving else MODE_EXPORT
+            else:
+                mode = MODE_SOLAR if batt > 0.05 else MODE_SELF
+            if kwh + batt * sl.hours < min_kwh:
+                batt = min(0.0, (min_kwh - kwh) / sl.hours)
+                mode = MODE_GRID
+                exp_kw = spill = 0.0
+                imp_kw = max(0.0, net + batt * eff)
+        # exp_kw: planned exports; spill: solar the battery can't take, exported too
         kwh += batt * sl.hours
-        rows.append({"kwh": kwh, "batt": batt, "mode": mode, "exp_kw": exp_kw, "imp_kw": imp_kw,
-                     "free_kw": free_kw, "free": free_now})
+        rows.append({"kwh": kwh, "batt": batt, "mode": mode, "exp_kw": exp_kw + spill, "imp_kw": imp_kw,
+                     "free_kw": free_kw, "free": free_now, "spill": spill})
     return rows
 
 
@@ -487,7 +596,7 @@ class _ExportSearch:
         self.cfg, self.inp, self.slots, self.exp = cfg, inp, slots, exp
         self.buy: list[float | None] = [None] * len(slots)
         self.margin = cfg.export_margin / 100
-        self.tgt_kwh = cfg.target_soc / 100 * cfg.capacity_kwh
+        cap = cfg.capacity_kwh
         known = [p for p in (_import_price(inp, sl) for sl in slots) if p is not None]
         worst = max(known, default=0.0)
         # an unpriced slot is assumed to cost the most seen (free-session import is netted off per row)
@@ -499,7 +608,11 @@ class _ExportSearch:
             if sl.buyback is not None:
                 self.windows.setdefault(sl.buyback, i)
         rows0 = _simulate(cfg, inp, slots, [0.0 if sl.sched else x for sl, x in zip(slots, exp)], self.buy)
-        self.short0 = {b: max(0.0, self.tgt_kwh - rows0[b]["kwh"]) for b in self.windows}
+        self.tgt = {b: (cfg.target_soc if slots[b].tgt is None else slots[b].tgt) / 100 * cap for b in self.windows}
+        self.short0 = {b: max(0.0, self.tgt[b] - rows0[b]["kwh"]) for b in self.windows}
+        # with solar, energy left at the end differs between plans: worth what it saves buying
+        # in the next window (without solar every plan ends at the same recharged target)
+        self.end_p = min(self.imp_p, default=0.0) / cfg.charge_eff if any(sl.pv_kw for sl in slots) else 0.0
 
     def simulate(self) -> list[dict]:
         return _simulate(self.cfg, self.inp, self.slots, self.exp, self.buy)
@@ -511,14 +624,16 @@ class _ExportSearch:
         v = ek_tot = peak = 0.0
         for sl, r, ip in zip(self.slots, rows, self.imp_p):
             ek, ik, paid = r["exp_kw"] * sl.hours, r["imp_kw"] * sl.hours, (r["imp_kw"] - r["free_kw"]) * sl.hours
-            ek_tot += ek
+            ek_tot += ek - r["spill"] * sl.hours  # (solar spilt isn't an export the search chose)
             v += ek * ((sl.export_p or 0) / 100) - paid * ip
             if not (sl.sched or sl.iog_h > 0 or r["free"]):
                 peak += ik
         short = 0.0
         for b, a in self.windows.items():
             if any(self.exp[i] > 0 for i in range(a, b + 1)):
-                short = max(short, self.tgt_kwh - rows[b]["kwh"] - self.short0[b])
+                short = max(short, self.tgt[b] - rows[b]["kwh"] - self.short0[b])
+        if self.end_p:
+            v += rows[-1]["kwh"] * self.end_p
         return v, ek_tot, peak, short
 
     def beats_peak(self, j: int) -> bool:
@@ -664,21 +779,87 @@ def _choose_exports(
     return exp, search.buy
 
 
-def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
-    """Run the planner and return a JSON-serialisable result."""
-    if cfg.hard_min_soc is not None and cfg.hard_min_soc > cfg.min_soc:
-        cfg = replace(cfg, min_soc=cfg.hard_min_soc)  # the inverter stops higher: plan to that
-    slots = build_slots(cfg, inp)
+def _run(cfg: PlannerConfig, inp: PlannerInputs, target: float | None) -> tuple[list[_Slot], list[dict]]:
+    """Slots and simulated rows for one plan, the next window charging to ``target`` if given."""
+    slots = build_slots(cfg, inp, target)
     firm = _firm_dispatches(inp) if cfg.dispatch_charges_battery else []
-    search_slots = slots if firm == list(inp.dispatches) else build_slots(cfg, replace(inp, dispatches=firm))
+    search_slots = slots if firm == list(inp.dispatches) else build_slots(cfg, replace(inp, dispatches=firm), target)
     exp, buy = _choose_exports(cfg, inp, slots, search_slots)
     sim = cfg
     if cfg.hard_min_soc is not None and cfg.hard_min_soc < min(cfg.min_soc, cfg.reserve_soc):
         # min_soc is the plan's target; below it the battery still runs the house down to the
         # inverter's minimum before importing, so that's what the forecast and costs show
         sim = replace(cfg, min_soc=cfg.hard_min_soc)
-    rows = _simulate(sim, inp, slots, exp, buy)
-    return _report(cfg, inp, slots, rows)
+    return slots, _simulate(sim, inp, slots, exp, buy)
+
+
+def _plan_value(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: list[dict]) -> float:
+    """Value of a simulated plan (GBP): exports less import paid, plus what's left in the battery
+    at the end, at what the cheapest import would cost to put it back. Unpriced import is
+    assumed to cost the most seen."""
+    prices = [_import_price(inp, sl) for sl in slots]
+    worst = max((p for p in prices if p is not None), default=0.0)
+    low = min((p for p in prices if p is not None), default=0.0)
+    v = 0.0
+    for sl, r, ip in zip(slots, rows, prices):
+        v += r["exp_kw"] * sl.hours * ((sl.export_p or 0) / 100)
+        v -= (r["imp_kw"] - r["free_kw"]) * sl.hours * (worst if ip is None else ip)
+    return v + rows[-1]["kwh"] * low / cfg.charge_eff
+
+
+def _choose_target(cfg: PlannerConfig, inp: PlannerInputs) -> tuple[float, dict]:
+    """The next window's charge target with solar: the one whose plan is worth most, weighing an
+    expected day (the forecast) and a dull one (``pv_dull`` of it) by ``pv_risk``.
+
+    Each candidate is a whole plan (its own exports), so cheap overnight import, the export rate
+    when the battery is full, the evening peak and the forecast's error all count. Equal values
+    go to the higher target (the SOC is a buffer), and the previous choice is kept unless another
+    beats it by ``TARGET_KEEP_GBP`` so the target doesn't flip between replans."""
+    hi = cfg.target_soc
+    lo = max(cfg.reserve_soc, cfg.min_soc, 10.0)
+    cands = [hi]
+    t = math.ceil(hi / TARGET_STEP) * TARGET_STEP - TARGET_STEP
+    while t >= lo - 1e-9:
+        cands.append(t)
+        t -= TARGET_STEP
+    dull = replace(inp, pv={k: v * inp.pv_dull for k, v in inp.pv.items()})
+    r = min(1.0, max(0.0, cfg.pv_risk))
+    scores: dict[float, float] = {}
+    for t in cands:
+        v = 0.0
+        if r < 1:
+            v += (1 - r) * _plan_value(cfg, inp, *_run(cfg, inp, t))
+        if r > 0:
+            v += r * _plan_value(cfg, dull, *_run(cfg, dull, t))
+        scores[t] = v
+    best = cands[0]
+    for t in cands[1:]:
+        if scores[t] > scores[best] + 0.005:
+            best = t
+    prev = inp.prev_target
+    if prev is not None and prev in scores and scores[prev] >= scores[best] - TARGET_KEEP_GBP:
+        best = prev
+    return best, {f"{t:g}": _r(v, 3) for t, v in scores.items()}
+
+
+def plan(cfg: PlannerConfig, inp: PlannerInputs) -> dict:
+    """Run the planner and return a JSON-serialisable result."""
+    if cfg.hard_min_soc is not None and cfg.hard_min_soc > cfg.min_soc:
+        cfg = replace(cfg, min_soc=cfg.hard_min_soc)  # the inverter stops higher: plan to that
+    solar = sum(inp.pv.values()) > 0.2  # (kW summed over slots: about 0.1 kWh)
+    target, scores = inp.window_target, None
+    if solar and target is None and cfg.pv_optimise and _next_window(build_slots(cfg, inp)) is not None:
+        target, scores = _choose_target(cfg, inp)
+    if target is not None:
+        target = min(target, cfg.target_soc)
+    slots, rows = _run(cfg, inp, target)
+    out = _report(cfg, inp, slots, rows)
+    if solar or inp.pv:
+        out["plan_target_soc"] = target if target is not None else cfg.target_soc
+        out["pv_dull"] = inp.pv_dull
+        if scores:
+            out["target_scores"] = scores
+    return out
 
 
 def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: list[dict]) -> dict:
@@ -719,6 +900,9 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
                 forecast[-1]["wc"] = _r(sl.cool_kw, 2)
             if sl.temp is not None:
                 forecast[-1]["tf"] = _r(sl.temp, 1)
+        if inp.pv:
+            forecast[-1]["pv"] = _r(sl.pv_kw, 2)  # solar forecast, kW
+            forecast[-1]["pk"] = _r(row["spill"] * sl.hours, 3)  # solar the battery can't take, exported (kWh)
         d = days.setdefault(
             sl.start.astimezone(inp.tz).date().isoformat(),
             {"import_kwh": 0.0, "import_cost": 0.0, "export_kwh": 0.0, "export_value": 0.0, "priced": True, "hours": 0.0},
@@ -726,6 +910,8 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         d["hours"] += sl.hours
         if inp.weather:
             d["weather_kwh"] = d.get("weather_kwh", 0.0) + (sl.heat_kw + sl.cool_kw) * sl.hours
+        if inp.pv:
+            d["pv_kwh"] = d.get("pv_kwh", 0.0) + sl.pv_kw * sl.hours
         d["import_kwh"] += ik
         d["export_kwh"] += ek
         if sl.import_gbp is None and paid > 1e-6:
@@ -734,7 +920,7 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         d["import_cost"] += paid * (sl.import_gbp or 0)
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
-        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh", "unpriced_kwh"):
+        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh", "unpriced_kwh", "pv_kwh"):
             if k in d:
                 d[k] = _r(d[k], 2 if "kwh" in k else 3)
         d["hours"] = _r(d["hours"], 2)

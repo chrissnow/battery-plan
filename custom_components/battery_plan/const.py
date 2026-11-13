@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "battery_plan"
-VERSION = "0.6.11"
+VERSION = "0.7.0"
 UPDATE_INTERVAL = timedelta(minutes=5)
 LOAD_PROFILE_REFRESH = timedelta(hours=1)
 CARD_URL = "/battery_plan/battery-plan-card.js"
@@ -18,6 +18,7 @@ SEC_LOAD = "load"
 SEC_WEATHER = "weather"
 SEC_OCTOPUS = "octopus"
 SEC_ACTUALS = "actuals"
+SEC_SOLAR = "solar"
 SEC_CONTROL = "control"
 
 # Battery
@@ -81,6 +82,16 @@ CONF_WEATHER_COOLING = "weather_cooling"
 CONF_WEATHER_DAYS = "weather_days"
 WEATHER_FIT_REFRESH = timedelta(hours=6)
 WEATHER_FORECAST_REFRESH = timedelta(minutes=30)
+
+# Solar
+CONF_PV_FORECAST_ENTRY = "pv_forecast_entry"
+CONF_PV_ENTITY = "pv_entity"
+CONF_PV_SCALE = "pv_scale"
+CONF_PV_AC_COUPLED = "pv_ac_coupled"
+CONF_PV_EXPORT = "pv_export"
+CONF_PV_OPTIMISE = "pv_optimise_target"
+CONF_PV_RISK = "pv_risk"
+PV_FORECAST_REFRESH = timedelta(minutes=30)
 
 # Octopus extras
 CONF_DISPATCHING_ENTITY = "dispatching_entity"
@@ -168,6 +179,11 @@ DEFAULTS: dict = {
     CONF_BATTERY_VOLTAGE: 51.2,
     CONF_STALE_MIN: 15,
     CONF_CHARGE_SOC_IDLE: 0,
+    CONF_PV_SCALE: 1.0,
+    CONF_PV_AC_COUPLED: False,
+    CONF_PV_EXPORT: True,
+    CONF_PV_OPTIMISE: True,
+    CONF_PV_RISK: 0.3,
 }
 
 SECTIONS: dict[str, list[str]] = {
@@ -227,6 +243,15 @@ SECTIONS: dict[str, list[str]] = {
         CONF_WEATHER_LOAD_ENTITIES,
         CONF_WEATHER_COOLING,
         CONF_WEATHER_DAYS,
+    ],
+    SEC_SOLAR: [
+        CONF_PV_FORECAST_ENTRY,
+        CONF_PV_ENTITY,
+        CONF_PV_SCALE,
+        CONF_PV_AC_COUPLED,
+        CONF_PV_EXPORT,
+        CONF_PV_OPTIMISE,
+        CONF_PV_RISK,
     ],
     SEC_OCTOPUS: [
         CONF_DISPATCHING_ENTITY,

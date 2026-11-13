@@ -150,6 +150,27 @@
               "weather_days": "How many days of history to learn the temperature effect from."
             }
           },
+          "solar": {
+            "name": "Solar",
+            "data": {
+              "pv_forecast_entry": "Solar forecast",
+              "pv_entity": "PV power or energy sensor",
+              "pv_scale": "Forecast scale",
+              "pv_ac_coupled": "AC-coupled PV",
+              "pv_export": "Export surplus PV",
+              "pv_optimise_target": "Lower the overnight target for sun",
+              "pv_risk": "Dull-day weight"
+            },
+            "data_description": {
+              "pv_forecast_entry": "Optional: the solar forecast integration the Energy dashboard uses (Forecast.Solar, Solcast, ...). Turns on solar in the plan.",
+              "pv_entity": "Optional: total PV power (W/kW) or energy (kWh). Learns the forecast's bias and how dull a bad day is from the last 4 weeks, and corrects the rest of today from what has been made so far.",
+              "pv_scale": "Multiplies the forecast until the bias has been learned (or always, without a PV sensor).",
+              "pv_ac_coupled": "On if the PV inverter is on the AC side (a grid-tie inverter); off for MPPTs on the battery (DC).",
+              "pv_export": "Export PV the battery and house can't use (unless the export rate is below zero). Off for a zero-export system.",
+              "pv_optimise_target": "Choose the next overnight charge target by cost, leaving room for tomorrow's sun. It never goes above the configured target and is fixed once the window starts.",
+              "pv_risk": "How much a dull day (from the forecast's history) counts against the expected day when choosing the target (0 = only the forecast, 1 = only the dull day)."
+            }
+          },
           "octopus": {
             "name": "Intelligent Octopus & Octoplus",
             "data": {
@@ -375,6 +396,27 @@
               "weather_days": "How many days of history to learn the temperature effect from."
             }
           },
+          "solar": {
+            "name": "Solar",
+            "data": {
+              "pv_forecast_entry": "Solar forecast",
+              "pv_entity": "PV power or energy sensor",
+              "pv_scale": "Forecast scale",
+              "pv_ac_coupled": "AC-coupled PV",
+              "pv_export": "Export surplus PV",
+              "pv_optimise_target": "Lower the overnight target for sun",
+              "pv_risk": "Dull-day weight"
+            },
+            "data_description": {
+              "pv_forecast_entry": "Optional: the solar forecast integration the Energy dashboard uses (Forecast.Solar, Solcast, ...). Turns on solar in the plan.",
+              "pv_entity": "Optional: total PV power (W/kW) or energy (kWh). Learns the forecast's bias and how dull a bad day is from the last 4 weeks, and corrects the rest of today from what has been made so far.",
+              "pv_scale": "Multiplies the forecast until the bias has been learned (or always, without a PV sensor).",
+              "pv_ac_coupled": "On if the PV inverter is on the AC side (a grid-tie inverter); off for MPPTs on the battery (DC).",
+              "pv_export": "Export PV the battery and house can't use (unless the export rate is below zero). Off for a zero-export system.",
+              "pv_optimise_target": "Choose the next overnight charge target by cost, leaving room for tomorrow's sun. It never goes above the configured target and is fixed once the window starts.",
+              "pv_risk": "How much a dull day (from the forecast's history) counts against the expected day when choosing the target (0 = only the forecast, 1 = only the dull day)."
+            }
+          },
           "octopus": {
             "name": "Intelligent Octopus & Octoplus",
             "data": {
@@ -494,7 +536,8 @@
           "iog": "IOG top-up",
           "export": "Export",
           "saving": "Saving session export",
-          "grid": "Battery at minimum"
+          "grid": "Battery at minimum",
+          "solar": "Solar charge"
         }
       },
       "planned_export": {
@@ -547,7 +590,8 @@
           "iog": "IOG top-up",
           "export": "Export",
           "saving": "Saving session export",
-          "grid": "Battery at minimum"
+          "grid": "Battery at minimum",
+          "solar": "Solar charge"
         }
       },
       "weather_load_today": {

@@ -4,6 +4,7 @@ Without the Home Assistant test packages: pytest --noconftest tests/test_planner
 """
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import math
 from pathlib import Path
 import sys
 from zoneinfo import ZoneInfo
@@ -441,3 +442,95 @@ def test_no_sliver_export_in_the_half_hour_under_way():
         res = _plan(exp, soc=soc, load=1.5, now=now, export_peak_import=True, min_soc=15, reserve_soc=20,
                     day_reserve_soc=25)
         assert res["forecast"][0]["ek"] == 0, soc
+
+
+# ---------- solar ----------
+DS = datetime(2026, 6, 4, tzinfo=timezone.utc)  # summer: BST
+IMP_S = [0.07 if (i < 9 or i >= 45) else 0.30 for i in range(48)] * 3  # off-peak 23:30-05:30 BST
+EVE = lambda mid: [0.27 if 31 <= i < 37 else mid for i in range(48)] * 3  # 16:30-19:30 BST
+
+
+def _pv(peak_kw, days=3):
+    """Solar forecast: a sin² curve 06:00-20:00 BST, ``peak_kw`` at 13:00."""
+    out = {}
+    for d in range(days):
+        for i in range(48):
+            h = i / 2 + 1
+            if 6 <= h <= 20:
+                out[int((DS + timedelta(days=d) + i * P.HALF).timestamp())] = peak_kw * math.sin(math.pi * (h - 6) / 14) ** 2
+    return out
+
+
+def _solar(peak, soc=40, load=0.8, hour=20, mid=0.04, inp_kw=None, **kw):
+    cfg = P.PlannerConfig(**{**BASE, "target_soc": 100, "charge_start": 23 * 3600 + 1800, **kw})
+    rates = lambda vals: [P.Rate(DS + i * P.HALF, DS + (i + 1) * P.HALF, v) for i, v in enumerate(vals)]
+    inp = P.PlannerInputs(now=DS + timedelta(hours=hour), tz=TZ, soc=soc, load_kw=[load] * 24,
+                          export_rates=rates(EVE(mid)), import_rates=rates(IMP_S), pv=_pv(peak), **(inp_kw or {}))
+    return P.plan(cfg, inp)
+
+
+def test_solar_surplus_charges_then_spills():
+    """Midday surplus charges the battery up to 100% (past the charge target), then is exported."""
+    res = _solar(8, soc=90, hour=6, pv_optimise=False, mid=0.06)
+    fc = res["forecast"]
+    assert any(f["mode"] == "solar" for f in fc)
+    assert max(f["soc"] for f in fc) == pytest.approx(100, abs=0.05)
+    full = [f for f in fc if f["soc"] >= 99.95 and f["pv"] > 3]
+    assert full and all(f["pk"] > 0 for f in full)  # full: the surplus is exported
+    day = res["days"]["2026-06-04"]
+    assert day["pv_kwh"] > 40 and day["export_kwh"] >= sum(f["pk"] for f in fc if f["t"] < "2026-06-04T23:00") - 0.05
+    assert "pv" not in _plan([0.2] * 96)["forecast"][0]  # no solar: the plan is as before
+
+
+def test_solar_curtailed_when_export_negative():
+    res = _solar(8, soc=100, hour=6, pv_optimise=False, mid=-0.02)
+    assert sum(f["pk"] for f in res["forecast"] if f["t"] < "2026-06-04T16:00") == 0
+    assert _solar(8, soc=100, hour=6, pv_optimise=False, mid=0.01)["days"]["2026-06-04"]["export_kwh"] > 10
+    assert _solar(8, soc=100, hour=6, pv_optimise=False, pv_export=False)["days"]["2026-06-04"]["export_kwh"] <= 30.1
+
+
+def test_solar_inverter_limit_ac_vs_dc():
+    """DC solar reaches the grid through the inverter (house + export within its limit); AC-coupled
+    solar on the output doesn't."""
+    kw = dict(soc=100, hour=6, pv_optimise=False, mid=0.06, inverter_kw=5.0, load=1.0)
+    noon = lambda r: next(f for f in r["forecast"] if f["t"] == "2026-06-04T12:00:00.000Z")
+    dc, ac = _solar(9, **kw), _solar(9, pv_ac_coupled=True, **kw)
+    assert noon(dc)["ek"] <= (5.0 - 1.0) / 2 + 0.01
+    assert noon(ac)["ek"] > noon(dc)["ek"] + 0.5
+
+
+def test_solar_lowers_the_target():
+    """A sunny tomorrow and little paid for midday export: charging overnight is energy the sun
+    would have put in anyway, so the next window's target comes down; a dull forecast keeps it."""
+    targets = [_solar(p)["plan_target_soc"] for p in (0.5, 5, 8)]
+    assert targets[0] >= 95 and targets[1] < targets[0] and targets[2] < targets[1]
+    sunny = _solar(8)
+    assert "target_scores" in sunny and sunny["plan_target_soc"] <= 50
+    # the window charges only to it; the next night's window to the configured target
+    night1 = [f for f in sunny["forecast"] if "2026-06-04T22:30" <= f["t"] <= "2026-06-05T04:30"]
+    assert night1 and not any(f["mode"] == "charge" for f in night1)  # already above it: no charge
+    night2 = [f for f in sunny["forecast"] if "2026-06-05T22:30" <= f["t"] <= "2026-06-06T04:30"]
+    assert any(f["mode"] == "charge" for f in night2)
+    # a dull-day scenario weighed more raises it
+    assert _solar(5, pv_risk=1.0, inp_kw={"pv_dull": 0.3})["plan_target_soc"] > _solar(5, pv_risk=0.0)["plan_target_soc"]
+    # dear midday export: worth charging overnight and selling the sun (arbitrage), target stays up
+    assert _solar(8, mid=0.15)["plan_target_soc"] == 100
+
+
+def test_solar_target_fixed_or_kept():
+    """A frozen target (inside the window) is used as given; the previous choice is kept unless
+    another is clearly better (no flip-flopping between replans)."""
+    assert _solar(8, inp_kw={"window_target": 70.0})["plan_target_soc"] == 70.0
+    best = _solar(5)
+    scores = {float(k): v for k, v in best["target_scores"].items()}
+    near = max((t for t in scores if t != best["plan_target_soc"]), key=lambda t: scores[t])
+    if scores[best["plan_target_soc"]] - scores[near] < P.TARGET_KEEP_GBP:
+        assert _solar(5, inp_kw={"prev_target": near})["plan_target_soc"] == near
+
+
+def test_solar_during_charge_window():
+    """Solar in a morning window covers the house and the charge first: less import."""
+    kw = dict(soc=30, hour=7, pv_optimise=False, charge_start=8 * 3600, charge_duration=4 * 3600, charge_mode="max")
+    res, dark = _solar(6, **kw), _solar(0, **kw)
+    imp = lambda r: sum(f["ik"] for f in r["forecast"] if f["t"] <= "2026-06-04T11:00")
+    assert imp(res) < imp(dark) - 1
