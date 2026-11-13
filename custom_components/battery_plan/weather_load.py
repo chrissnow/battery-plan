@@ -13,7 +13,10 @@ Model, per hour of the day h (local):
 
 b and c are shared across the day and fitted over the last few weeks (hour
 fixed effects, balance points by grid search), so it stays stable on small or
-noisy data. The fit is only used when it is clearly supported by the data;
+noisy data. With dedicated heating sensors each hour's term is scaled by w_h,
+that hour's share of the sensors' recent energy (mean 1 over the day; see
+``hour_weights``): a heat pump that only runs overnight puts its extra cold-weather
+load overnight, not spread over hours it is off. The fit is only used when it is clearly supported by the data;
 otherwise the plan falls back to the plain load schedule.
 
 Prediction: for each future half hour the plan's 7-day load schedule is moved
@@ -35,6 +38,7 @@ MIN_DAYS = 7
 MIN_ACTIVE_HOURS = 48  # hours with the temperature past the balance point
 MIN_GAIN = 0.03  # the weather terms must explain >= 3% of the within-hour variance
 MAX_SENS = 3.0  # kW per degC: anything bigger is a data problem
+WEIGHT_FLAT = 0.1  # share of a flat profile mixed into the hour weights (no hour is ever zero)
 
 
 @dataclass
@@ -64,20 +68,24 @@ class WeatherModel:
     line_base_kwh: float | None = None  # daily line: base + line_hours * weather_kw(T)
     line_hours: int = 24
     typical_kw: list[float] = field(default_factory=lambda: [0.0] * 24)  # weather load by hour, recent days
+    weights: list[float] | None = None  # per local hour (mean 1); None = the same in every hour
 
     @property
     def active(self) -> bool:
         return self.status == "active"
 
-    def heat_kw(self, temp: float) -> float:
+    def _w(self, hod: int | None) -> float:
+        return self.weights[hod] if self.weights and hod is not None else 1.0
+
+    def heat_kw(self, temp: float, hod: int | None = None) -> float:
         if not self.active or self.heat_kw_per_c is None or self.heat_below_c is None:
             return 0.0
-        return self.heat_kw_per_c * max(0.0, self.heat_below_c - temp)
+        return self.heat_kw_per_c * max(0.0, self.heat_below_c - temp) * self._w(hod)
 
-    def cool_kw(self, temp: float) -> float:
+    def cool_kw(self, temp: float, hod: int | None = None) -> float:
         if not self.active or self.cool_kw_per_c is None or self.cool_above_c is None:
             return 0.0
-        return self.cool_kw_per_c * max(0.0, temp - self.cool_above_c)
+        return self.cool_kw_per_c * max(0.0, temp - self.cool_above_c) * self._w(hod)
 
     def as_dict(self) -> dict[str, Any]:
         r = lambda v, n=3: None if v is None else round(v, n)  # noqa: E731
@@ -93,6 +101,7 @@ class WeatherModel:
             "hours": self.hours,
             "line_base_kwh": r(self.line_base_kwh, 2),
             "line_hours": self.line_hours,
+            "hour_weights": [round(w, 2) for w in self.weights] if self.weights else None,
             "daily": self.daily,
         }
 
@@ -115,16 +124,35 @@ def smooth(temps: Iterable[tuple[datetime, float | None]], start: float | None =
     return out
 
 
-def _fit_fixed(rows: list[Row], tb: float | None, tc: float | None) -> tuple[float, float, float] | None:
+def hour_weights(profile: list[float | None]) -> list[float] | None:
+    """Per local hour weights (mean 1) from a half-hourly (48) or hourly (24) heating profile.
+
+    Each hour's share of the profile's energy, mixed with WEIGHT_FLAT of a flat
+    profile. None when the profile is missing or holds no energy.
+    """
+    if len(profile) not in (24, 48) or any(v is None for v in profile):
+        return None
+    per = 2 if len(profile) == 48 else 1
+    hourly = [sum(max(0.0, profile[h * per + k]) for k in range(per)) / per for h in range(24)]
+    mean = sum(hourly) / 24
+    if mean < 0.01:
+        return None
+    return [(1 - WEIGHT_FLAT) * v / mean + WEIGHT_FLAT for v in hourly]
+
+
+def _fit_fixed(
+    rows: list[Row], tb: float | None, tc: float | None, weights: list[float] | None = None
+) -> tuple[float, float, float] | None:
     """Least squares for b (and c) with per-hour fixed effects. Returns (b, c, sse)."""
     groups: dict[int, list[Row]] = {}
     for r in rows:
         groups.setdefault(r.hod, []).append(r)
     sxx = sxy = syy = scc = scy = sxc = 0.0
-    for g in groups.values():
+    for hod, g in groups.items():
         n = len(g)
-        x = [max(0.0, tb - r.temp) if tb is not None else 0.0 for r in g]
-        c = [max(0.0, r.temp - tc) if tc is not None else 0.0 for r in g]
+        w = weights[hod] if weights else 1.0
+        x = [w * max(0.0, tb - r.temp) if tb is not None else 0.0 for r in g]
+        c = [w * max(0.0, r.temp - tc) if tc is not None else 0.0 for r in g]
         y = [r.load for r in g]
         mx, mc, my = sum(x) / n, sum(c) / n, sum(y) / n
         for xi, ci, yi in zip(x, c, y):
@@ -164,9 +192,14 @@ def _within_ss(rows: list[Row]) -> float:
     return tot
 
 
-def fit(rows: list[Row], cooling: bool, recent_days: int, now: datetime) -> WeatherModel:
-    """Fit the model; ``rows`` should already exclude dispatches, sessions etc."""
-    m = WeatherModel(status="not_enough_data")
+def fit(
+    rows: list[Row], cooling: bool, recent_days: int, now: datetime, weights: list[float] | None = None
+) -> WeatherModel:
+    """Fit the model; ``rows`` should already exclude dispatches, sessions etc.
+
+    ``weights`` (24, mean 1) scale each hour's weather terms (see ``hour_weights``).
+    """
+    m = WeatherModel(status="not_enough_data", weights=weights)
     rows = [r for r in rows if r.temp is not None and r.load is not None]
     days = sorted({r.day for r in rows})
     m.days, m.hours = len(days), len(rows)
@@ -182,7 +215,7 @@ def fit(rows: list[Row], cooling: bool, recent_days: int, now: datetime) -> Weat
     for tb in HEAT_POINTS:
         if sum(1 for r in rows if r.temp < tb) < MIN_ACTIVE_HOURS:
             continue
-        res = _fit_fixed(rows, tb, None)
+        res = _fit_fixed(rows, tb, None, weights)
         if res and res[0] > 0 and (best is None or res[2] < best[0]):
             best = (res[2], tb, None, res[0], 0.0)
     if cooling:
@@ -190,7 +223,7 @@ def fit(rows: list[Row], cooling: bool, recent_days: int, now: datetime) -> Weat
             if sum(1 for r in rows if r.temp > tc) < MIN_ACTIVE_HOURS:
                 continue
             tb = best[1] if best else None
-            res = _fit_fixed(rows, tb, tc)
+            res = _fit_fixed(rows, tb, tc, weights)
             if res and res[1] > 0 and (tb is None or res[0] > 0) and (best is None or res[2] < best[0]):
                 best = (res[2], tb, tc, res[0], res[1])
     if best is None:
@@ -215,7 +248,7 @@ def fit(rows: list[Row], cooling: bool, recent_days: int, now: datetime) -> Weat
     acc: list[list[float]] = [[] for _ in range(24)]
     for r in rows:
         if r.t >= since:
-            acc[r.hod].append(m.heat_kw(r.temp) + m.cool_kw(r.temp))
+            acc[r.hod].append(m.heat_kw(r.temp, r.hod) + m.cool_kw(r.temp, r.hod))
     m.typical_kw = [sum(v) / len(v) if v else 0.0 for v in acc]
 
     # daily points for the scatter chart, and the line through them
@@ -279,7 +312,7 @@ def slot_adjustments(
         tr = interp(raw, mid)
         if ts is None:
             continue
-        h, c = model.heat_kw(ts), model.cool_kw(ts)
         hod = mid.astimezone(tz).hour
+        h, c = model.heat_kw(ts, hod), model.cool_kw(ts, hod)
         out[int(s.timestamp())] = (h + c - model.typical_kw[hod], h, c, tr if tr is not None else ts)
     return out

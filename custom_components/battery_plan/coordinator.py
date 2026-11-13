@@ -98,6 +98,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, SolarInputsMixin, DataUpdateCoordi
         self._load_at: datetime | None = None
         self._load_source = "flat"
         self._load_masked = 0
+        self._heat_profile: list[float] | None = None  # dedicated heating sensors' half-hourly kW
         self.weather_model: W.WeatherModel | None = None
         self._w_fit_at: datetime | None = None
         self._w_last_sm: float | None = None

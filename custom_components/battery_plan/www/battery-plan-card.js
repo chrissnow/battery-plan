@@ -205,7 +205,9 @@ class BatteryPlanCard extends HTMLElement {
       const label = k === todayKey ? (whole ? 'Today <small class="part">actual + plan</small>' : 'Today (rest)')
         : new Date(k + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
           + (p.hours != null && p.hours < 23 ? ` <small class="part">to ${String(Math.round(p.hours)).padStart(2, '0')}:00</small>` : '');
-      const wx = p.weather_kwh > 0.05 ? `<small class="wx">incl. ${p.weather_kwh.toFixed(1)} kWh ${a.weather_model && a.weather_model.cooling_kw_per_c && !a.weather_model.heating_kw_per_c ? 'cooling' : 'heating'}${whole ? ' to come' : ''}</small>` : '';
+      const wkind = a.weather_model && a.weather_model.cooling_kw_per_c && !a.weather_model.heating_kw_per_c ? 'cooling' : 'heating';
+      const wx = p.heating_kwh > 0.05 ? `<small class="wx">incl. ${p.heating_kwh.toFixed(1)} kWh ${wkind}${whole ? ' to come' : ''}</small>`
+        : p.weather_kwh > 0.05 ? `<small class="wx">incl. ${p.weather_kwh.toFixed(1)} kWh ${wkind} from the cold${whole ? ' to come' : ''}</small>` : '';
       // import past the published rates isn't priced: show how much, and no net for the day
       const un = p.unpriced_kwh || 0;
       const allUn = un > 0 && un >= d.import_kwh - 0.05;
@@ -296,6 +298,11 @@ class BatteryPlanCard extends HTMLElement {
 
     // ---- house load strip: base + heating/cooling bars, forecast temperature, actual load ----
     const wm = a.weather_model || null, wmOn = !!(wm && wm.status === 'active');
+    const kindWord = wm && wm.cooling_kw_per_c && !wm.heating_kw_per_c ? 'Cooling' : 'Heating';
+    const kindCol = kindWord === 'Cooling' ? BP_COOL : BP_HEAT;
+    // with dedicated heating sensors the plan has each slot's heating in total (ht): the bar is
+    // split into the rest of the house and heating; otherwise only the part due to the weather
+    const hasHt = pts.some(p => p.ht != null);
     const hasPv = pts.some(p => p.pv > 0.01);
     const showLoad = c.show_load && (pts.some(p => p.ld != null) || hasPv);
     const LH = 96, LT = 6, LB = 8;
@@ -308,9 +315,11 @@ class BatteryPlanCard extends HTMLElement {
       let bars = '';
       pts.forEach((p, i) => {
         const s0 = i === 0 ? now : pts[i - 1].t, x0 = x(s0) + 0.5, w = Math.max(0, x(p.t) - x(s0) - 1);
-        const wh = p.wh || 0, wc = p.wc || 0, base = Math.max(0, (p.ld || 0) - wh - wc);
+        const tot = p.ht != null;
+        const wh = tot ? Math.min(p.ht, p.ld || 0) : (p.wh || 0), wc = tot ? 0 : (p.wc || 0);
+        const base = Math.max(0, (p.ld || 0) - wh - wc);
         bars += `<rect x="${x0}" y="${ly(base)}" width="${w}" height="${ly(0) - ly(base)}" fill="${BP_BASE}" opacity=".45"/>`;
-        if (wh > 0.01) bars += `<rect x="${x0}" y="${ly(base + wh)}" width="${w}" height="${ly(base) - ly(base + wh)}" fill="${BP_HEAT}" opacity=".75"/>`;
+        if (wh > 0.01) bars += `<rect x="${x0}" y="${ly(base + wh)}" width="${w}" height="${ly(base) - ly(base + wh)}" fill="${tot ? kindCol : BP_HEAT}" opacity=".75"/>`;
         if (wc > 0.01) bars += `<rect x="${x0}" y="${ly(base + wh + wc)}" width="${w}" height="${ly(base + wh) - ly(base + wh + wc)}" fill="${BP_COOL}" opacity=".75"/>`;
       });
       let pvPath = '';
@@ -343,9 +352,19 @@ class BatteryPlanCard extends HTMLElement {
           <rect class="hit" x="${L}" y="${LT}" width="${W - L - R}" height="${LH - LT - LB}" fill="transparent"/>
         </svg>`;
     }
-    const kindWord = wm && wm.cooling_kw_per_c && !wm.heating_kw_per_c ? 'Cooling' : 'Heating';
-    const wxLine = wmOn && (a.weather_load_today != null || a.weather_load_tomorrow != null)
-      ? `<div class="wxl"><i style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord} adds ${a.weather_load_today != null ? a.weather_load_today.toFixed(1) + ' kWh today' : ''}${a.weather_load_today != null && a.weather_load_tomorrow != null ? ' · ' : ''}${a.weather_load_tomorrow != null ? a.weather_load_tomorrow.toFixed(1) + ' kWh tomorrow' : ''}</div>` : '';
+    let wxLine = '';
+    if (hasHt) {
+      // heating in total per day (the rest of today, all of tomorrow), and how much of it the cold adds
+      const dd = a.days || {}, d0 = new Date(), d1 = new Date(d0.getTime() + 86400000);
+      const k0 = d0.toLocaleDateString('en-CA'), k1 = d1.toLocaleDateString('en-CA');
+      const cold = v => wmOn && v != null && v >= 0.05 ? `, ${v.toFixed(1)} from the cold` : '';
+      const parts = [];
+      if (dd[k0] && dd[k0].heating_kwh != null) parts.push(`${dd[k0].heating_kwh.toFixed(1)} kWh rest of today`);
+      if (dd[k1] && dd[k1].heating_kwh != null) parts.push(`${dd[k1].heating_kwh.toFixed(1)} kWh tomorrow${cold(a.weather_load_tomorrow)}`);
+      if (parts.length) wxLine = `<div class="wxl"><i style="background:${kindCol}"></i>${kindWord} ${parts.join(' · ')}</div>`;
+    } else if (wmOn && (a.weather_load_today != null || a.weather_load_tomorrow != null)) {
+      wxLine = `<div class="wxl"><i style="background:${kindCol}"></i>${kindWord} adds ${a.weather_load_today != null ? a.weather_load_today.toFixed(1) + ' kWh today' : ''}${a.weather_load_today != null && a.weather_load_tomorrow != null ? ' · ' : ''}${a.weather_load_tomorrow != null ? a.weather_load_tomorrow.toFixed(1) + ' kWh tomorrow' : ''}</div>`;
+    }
     const sol = a.solar || null;
     let pvLine = '';
     if (hasPv) {
@@ -425,7 +444,7 @@ class BatteryPlanCard extends HTMLElement {
           ${strip}
           <div class="tip" id="tip"></div>
         </div>
-        <div class="leg"><span><i style="background:var(--primary-text-color,#444)"></i>Actual</span><span><i style="background:var(--primary-color,#03a9f4);opacity:1"></i>Forecast</span>${legend}${showLoad ? `<span><i class="sq" style="background:${BP_BASE}"></i>House load</span>${hasPv ? `<span><i class="sq" style="background:${BP_PV}"></i>Solar</span>` : ''}${wmOn ? `<span><i class="sq" style="background:${kindWord === 'Cooling' ? BP_COOL : BP_HEAT}"></i>${kindWord}</span>` : ''}` : ''}</div>
+        <div class="leg"><span><i style="background:var(--primary-text-color,#444)"></i>Actual</span><span><i style="background:var(--primary-color,#03a9f4);opacity:1"></i>Forecast</span>${legend}${showLoad ? `<span><i class="sq" style="background:${BP_BASE}"></i>House load</span>${hasPv ? `<span><i class="sq" style="background:${BP_PV}"></i>Solar</span>` : ''}${wmOn || hasHt ? `<span><i class="sq" style="background:${kindCol}"></i>${hasHt ? kindWord : `${kindWord} from the cold`}</span>` : ''}` : ''}</div>
         ${wxLine}${pvLine}
         ${c.show_costs ? this._costTable(a) : ''}
         ${c.show_actions ? this._actionsTable(a) : ''}
@@ -444,8 +463,11 @@ class BatteryPlanCard extends HTMLElement {
         const p = pts.find(q => q.t >= t) || pts[pts.length - 1];
         html = `<b>${this._fmtTime(p.t, true)}</b> · ${p.soc}%<br>${BP_NAMES[p.mode] || p.mode} · ${p.kw} kW${p.rate != null ? ` · ${p.rate}p export` : ''}`;
         if (showLoad && p.ld != null) {
-          const wx = (p.wh || 0) + (p.wc || 0);
-          html += `<br>Load ${p.ld.toFixed(1)} kW${wx > 0.01 ? ` (${Math.max(0, p.ld - wx).toFixed(1)} base + ${wx.toFixed(1)} ${p.wc ? 'cooling' : 'heating'})` : ''}${p.tf != null ? ` · ${p.tf}°` : ''}`;
+          const wx = (p.wh || 0) + (p.wc || 0), kw = kindWord.toLowerCase();
+          const parts = p.ht != null
+            ? ` (${Math.max(0, p.ld - p.ht).toFixed(1)} house + ${p.ht.toFixed(1)} ${kw}${wx >= 0.05 ? `, ${wx.toFixed(1)} of it from the cold` : ''})`
+            : wx > 0.01 ? ` (${Math.max(0, p.ld - wx).toFixed(1)} base + ${wx.toFixed(1)} ${p.wc ? 'cooling' : 'heating'} from the cold)` : '';
+          html += `<br>Load ${p.ld.toFixed(1)} kW${parts}${p.tf != null ? ` · ${p.tf}°` : ''}`;
         }
         if (p.pv > 0.01) html += `<br>Solar ${p.pv.toFixed(1)} kW${p.pk > 0.005 ? ` · ${p.pk.toFixed(2)} kWh spills to export` : ''}`;
       } else if (hist.length || (this._past || []).length) {

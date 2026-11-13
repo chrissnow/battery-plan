@@ -4,7 +4,7 @@ Home Assistant custom integration (HACS). It plans a home battery's overnight ch
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
 and an all-day ESS charge schedule's target SOC. With a solar forecast it plans PV too and
-lowers the overnight target to leave room for the sun. Current version: **0.7.0**.
+lowers the overnight target to leave room for the sun. Current version: **0.7.1**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -29,7 +29,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 78 tests, ~40 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 80 tests, ~55 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -69,7 +69,7 @@ Test gotchas learned the hard way:
 | `solar.py` | Pure solar maths: energy-platform Wh/hour → kW per half hour (`slot_kw`), `calibrate` (bias = median actual/forecast, dull day = 20th percentile / bias, after ≥5 days), `nowcast` (rest of today from today's actual so far, weighted by the share of the day passed), `apply`. |
 | `solar_inputs.py` | `SolarInputsMixin`: the forecast from the chosen integration's `energy` platform (`async_get_solar_forecast`, as the Energy dashboard uses; cached 30 min), a Store of each day's forecast as it stood by 06:00 with that day's actual from the PV sensor's statistics (energy change, or power means), calibration and nowcast. Publishes the `solar` attribute. |
 | `helpers.py` | `_as_dt`, `_float`, `_secs`, `BAD` (shared parsing helpers). |
-| `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points, temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
+| `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points (scaled per hour by the heating sensors' recent profile when there are some, `hour_weights`), temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
 | `control.py` | `Controller`: every 30 s `compute()` builds a `_Ctx`, then `_charge_current` (spread in the window; spread during IOG top-ups to finish 15 min early; BMS capacity; planned rate in free sessions and charges bought ahead), `_charge_schedule_soc` (target for an all-day ESS schedule: raised for dispatches/free sessions/bought-ahead charges and optionally the window, else parked), `_setpoint` (SOC-tracking exports per half hour, held for the last minutes; overrides, export floor, saving sessions, hold = live load, idle/charge setpoints). Two independent switches (`setpoint_on`, `current_on`), configurable deadbands, revert on switch-off/unload/HA stop, EV inhibit relay, MQTT heartbeat. |
 | `sensor.py` | Plan sensors, cost sensors, control target/status sensors, battery action sensor (history drives the card's past bands), weather load today/tomorrow, heating sensitivity. Large attributes are in `BIG` (`_unrecorded_attributes`). |
 | `switch.py` / `select.py` / `number.py` / `binary_sensor.py` | Control switches (setpoint keeps unique id `<entry>_control`; both restore their state), override select, custom setpoint, EV inhibit and final-IOG-slot binary sensors. |
@@ -87,6 +87,28 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.7.1: heating by hour of day; heating shown apart from the house
+
+- With dedicated heating sensors (`weather_load_entities`) the load profile code also builds their own
+  half-hourly profile (same `load_days`, same masking; `_heat_profile`). The weather model's terms are
+  scaled per hour by `w_h` = that hour's share of the profile's energy (mean 1, 10 % flat mixed in,
+  `hour_weights`), in the fit, the typical load and the forecast. A heat pump that runs only 20:00-09:00
+  (James's IVT-22) now gets its cold-weather extra overnight, not 46 % of it in hours it is off.
+  Whole-house learning (no heating sensors) keeps `weights = None`: identical to 0.7.0.
+- Replay (forecast at midnight, actual temperatures, 21-day fit), mean hourly error current → weighted:
+  James 12 Nov 0.34 → 0.23 kW (the flat model was gated off at 1.8 % explained), 13 Nov 0.34 → 0.24;
+  Chris (heating runs all day) 0.48 → 0.45, 0.63 → 0.57. Both installs still under-forecast a cold
+  snap (Chris ~10 kWh/day on 12-13 Nov: the IVT-22 started space heating at ~0 °C, the response is
+  steeper than linear); open, revisit with more cold days.
+- Planner: `weather` tuples may carry a 5th value, the heating sensors' forecast in total
+  (profile + weather adjustment); forecast key `ht` (≤ `ld`), days `heating_kwh`. Display only.
+  `wh`/`weather_kwh` and the weather-load sensors keep meaning "due to the weather".
+- Card: with `ht` the load bars split into house and heating (the heating sensors are part of the
+  house load); the line reads "Heating X kWh rest of today · Y kWh tomorrow, Z from the cold".
+  Without it the orange part is labelled "from the cold".
+- James: switch `weather_load_entities` to the heating-only sensor once it has ≥ 7 days (~21 Nov);
+  until then his compressor total includes the 04:00 hot-water boost.
 
 ## 0.7.0: solar
 

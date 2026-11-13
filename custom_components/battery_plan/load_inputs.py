@@ -154,18 +154,21 @@ class LoadInputsMixin:
         flat = float(self.opts[CONF_LOAD_KW])
         ids = list(self.opts.get(CONF_LOAD_ENTITIES) or [])
         excl = [e for e in self.opts.get(CONF_LOAD_EXCLUDE) or [] if e not in ids]
+        heat = self._heating_ids()
         if not ids:
             self._load_source = "flat"
+            self._heat_profile = None
             return [flat] * 48
         if self._load is not None and self._load_at and now - self._load_at < LOAD_PROFILE_REFRESH:
             return self._load
         start = now - timedelta(days=int(self.opts[CONF_LOAD_DAYS]))
         try:
-            short = await self._stats(set(ids + excl), start, now, "5minute")
-            long = await self._stats(set(ids + excl), start, now, "hour")
+            short = await self._stats(set(ids + excl + heat), start, now, "5minute")
+            long = await self._stats(set(ids + excl + heat), start, now, "hour")
         except Exception as err:  # noqa: BLE001 - recorder missing or query failed
             _LOGGER.warning("Load profile from statistics failed, using flat %.2f kW: %s", flat, err)
             self._load_source = "flat"
+            self._heat_profile = None
             return [flat] * 48
 
         try:
@@ -195,7 +198,20 @@ class LoadInputsMixin:
         self._load, self._load_at = prof, now
         fine_any = any(short.get(e) for e in ids)
         self._load_source = ("statistics_5min" if fine_any else "statistics_hourly") if learned else "flat"
+        # the dedicated heating (weather-load) sensors' own profile, same days and masking: part of
+        # the house load above, shown as heating and used for the weather model's hour weights
+        self._heat_profile = None
+        if heat and learned:
+            hv = [per_entity(e) for e in heat]
+            hp = [None if any(v[i] is None for v in hv) else round(sum(v[i] for v in hv), 3) for i in range(48)]
+            self._heat_profile = hp if all(v is not None for v in hp) else None
         return prof
+
+    def _heating_ids(self) -> list[str]:
+        """Dedicated weather-load (heating/cooling) sensors, when the weather model is on."""
+        if not self.opts.get(CONF_WEATHER_ENTITY):
+            return []
+        return list(self.opts.get(CONF_WEATHER_LOAD_ENTITIES) or [])
 
     # ---------- weather-dependent load ----------
     def _weather_load_ids(self) -> tuple[list[str], list[str]]:
@@ -222,11 +238,24 @@ class LoadInputsMixin:
             self._w_forecast_at = now
             if self.weather_model and self.weather_model.active:
                 await self._weather_today(now)
-        if not self.weather_model or not self.weather_model.active:
-            return {}
+        tz = dt_util.get_default_time_zone()
         start0 = datetime.fromtimestamp(int(now.timestamp()) // 1800 * 1800, timezone.utc)
         slots = [start0 + timedelta(minutes=30 * i) for i in range(horizon)]
-        return W.slot_adjustments(self.weather_model, self._w_forecast, self._w_last_sm, slots, dt_util.get_default_time_zone())
+        active = bool(self.weather_model and self.weather_model.active)
+        adj = W.slot_adjustments(self.weather_model, self._w_forecast, self._w_last_sm, slots, tz) if active else {}
+        hp = self._heat_profile if self._heating_ids() else None
+        if not hp:
+            return adj
+        # with dedicated heating sensors: each slot's heating in total (its recent profile moved
+        # by the weather adjustment), so the card can show heating and the rest of the house apart
+        out: dict[int, tuple] = {}
+        for s in slots:
+            k = int(s.timestamp())
+            loc = s.astimezone(tz)
+            a = adj.get(k)
+            moved = hp[loc.hour * 2 + (loc.minute >= 30)] + (a[0] if a else 0.0)
+            out[k] = (*(a if a else (0.0, 0.0, 0.0, None)), max(0.0, moved))
+        return out
 
     async def _weather_forecast(self) -> list[tuple[datetime, float]]:
         eid = self.opts[CONF_WEATHER_ENTITY]
@@ -336,7 +365,9 @@ class LoadInputsMixin:
                     load = sum(per[e][h] for e in ids) - sum(per[e].get(h, 0.0) for e in excl)
                     rows.append(W.Row(t, loc.hour, loc.date().isoformat(), sm, temps[h], max(0.0, load)))
             past.setdefault(loc.date().isoformat(), 0.0)
-        self.weather_model = W.fit(rows, bool(o.get(CONF_WEATHER_COOLING)), int(o[CONF_LOAD_DAYS]), now)
+        # dedicated heating sensors: scale each hour by its share of their recent energy
+        weights = W.hour_weights(self._heat_profile) if not whole_house and self._heat_profile else None
+        self.weather_model = W.fit(rows, bool(o.get(CONF_WEATHER_COOLING)), int(o[CONF_LOAD_DAYS]), now, weights)
         self._w_last_sm = smoothed[datetime.fromtimestamp(hours[-1], timezone.utc)] if hours else None
 
     async def _weather_today(self, now: datetime) -> None:
@@ -348,7 +379,8 @@ class LoadInputsMixin:
         sm = W.smooth([(datetime.fromtimestamp(h, timezone.utc), temps[h]) for h in hours])
         m = self.weather_model
         done = sum(
-            m.heat_kw(v) + m.cool_kw(v) for t, v in sm if v is not None and t >= today0 and t + timedelta(hours=1) <= now
+            m.heat_kw(v, t.astimezone(tz).hour) + m.cool_kw(v, t.astimezone(tz).hour)
+            for t, v in sm if v is not None and t >= today0 and t + timedelta(hours=1) <= now
         )
         self._w_past = {today0.date().isoformat(): done}
         if sm and sm[-1][1] is not None:

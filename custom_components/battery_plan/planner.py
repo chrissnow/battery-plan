@@ -114,8 +114,10 @@ class PlannerInputs:
     # that doesn't move, so it's the only dispatch exports may count on to refill the battery
     ready: datetime | None = None
     # weather-dependent load, per half-hour slot start (epoch):
-    # (load adjustment kW, heating kW, cooling kW, forecast temperature)
-    weather: dict[int, tuple[float, float, float, float]] = field(default_factory=dict)
+    # (load adjustment kW, heating kW, cooling kW, forecast temperature or None[, heating in total kW])
+    # heating/cooling kW = the part due to the weather; the optional total is what dedicated heating
+    # sensors forecast for the slot (part of the house load, for display)
+    weather: dict[int, tuple] = field(default_factory=dict)
     # solar forecast: mean kW per half-hour slot start (epoch), already bias-corrected
     pv: dict[int, float] = field(default_factory=dict)
     pv_dull: float = 0.7  # a dull day as a fraction of the forecast (from its error history)
@@ -142,6 +144,7 @@ class _Slot:
     heat_kw: float = 0.0
     cool_kw: float = 0.0
     temp: float | None = None
+    heat_total_kw: float | None = None  # heating sensors' forecast, all of it (display only)
     next_charge: int = 0  # index of the first charge slot at or after this one (len(slots) if none)
     buyback: int | None = None  # in a charge window: the slot ending at its finish-early time
     free_id: int | None = None  # which free session (they each have their own cap)
@@ -330,6 +333,7 @@ def build_slots(cfg: PlannerConfig, inp: PlannerInputs, window_target: float | N
                 heat_kw=inp.weather.get(int(s.timestamp()), (0.0, 0.0))[1],
                 cool_kw=inp.weather.get(int(s.timestamp()), (0.0, 0.0, 0.0))[2],
                 temp=inp.weather[int(s.timestamp())][3] if int(s.timestamp()) in inp.weather else None,
+                heat_total_kw=inp.weather[int(s.timestamp())][4] if len(inp.weather.get(int(s.timestamp()), ())) > 4 else None,
                 floor=floor_at(cfg, frm, inp.tz),
                 export_p=None if exp_gbp is None else exp_gbp * 100,
                 import_gbp=imp_gbp,
@@ -900,6 +904,8 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
                 forecast[-1]["wc"] = _r(sl.cool_kw, 2)
             if sl.temp is not None:
                 forecast[-1]["tf"] = _r(sl.temp, 1)
+            if sl.heat_total_kw is not None:
+                forecast[-1]["ht"] = _r(min(sl.heat_total_kw, sl.load_kw), 2)
         if inp.pv:
             forecast[-1]["pv"] = _r(sl.pv_kw, 2)  # solar forecast, kW
             forecast[-1]["pk"] = _r(row["spill"] * sl.hours, 3)  # solar the battery can't take, exported (kWh)
@@ -910,6 +916,8 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         d["hours"] += sl.hours
         if inp.weather:
             d["weather_kwh"] = d.get("weather_kwh", 0.0) + (sl.heat_kw + sl.cool_kw) * sl.hours
+            if sl.heat_total_kw is not None:
+                d["heating_kwh"] = d.get("heating_kwh", 0.0) + min(sl.heat_total_kw, sl.load_kw) * sl.hours
         if inp.pv:
             d["pv_kwh"] = d.get("pv_kwh", 0.0) + sl.pv_kw * sl.hours
         d["import_kwh"] += ik
@@ -920,7 +928,7 @@ def _report(cfg: PlannerConfig, inp: PlannerInputs, slots: list[_Slot], rows: li
         d["import_cost"] += paid * (sl.import_gbp or 0)
         d["export_value"] += ek * ((sl.export_p or 0) / 100)
     for d in days.values():
-        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh", "unpriced_kwh", "pv_kwh"):
+        for k in ("import_kwh", "import_cost", "export_kwh", "export_value", "weather_kwh", "heating_kwh", "unpriced_kwh", "pv_kwh"):
             if k in d:
                 d[k] = _r(d[k], 2 if "kwh" in k else 3)
         d["hours"] = _r(d["hours"], 2)
