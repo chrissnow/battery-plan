@@ -118,7 +118,42 @@ def test_weights_put_heating_where_the_heat_pump_runs() -> None:
     assert min(night) > 0.5 and max(day) < 0.15
 
 
-async def test_weather_sensors_and_plan(hass, recorder_mock, octopus_states, freezer) -> None:
+def test_cop_model_forecasts_heat_over_cop() -> None:
+    """A heat pump whose heat is linear in the cold and whose COP falls with it (weather curve)."""
+    temps, _ = synth(b=0.0, noise=0.0)
+    hp_rows, rows = [], []
+    for r in temps:
+        heat = 0.3 * max(0.0, 16.0 - r.temp)
+        supply = 40.0 - 0.5 * r.raw_temp
+        elec = heat / W.carnot_cop(0.46, supply, r.raw_temp - W.COIL_GAP)
+        hp_rows.append(W.HeatPumpRow(r.t, r.hod, r.raw_temp, elec, supply, heat))
+    now = temps[-1].t + timedelta(hours=1)
+    cop = W.fit_cop(hp_rows, 0.47)
+    assert cop.ratio == pytest.approx(0.46, abs=0.005) and cop.ratio_learned
+    assert cop.b == pytest.approx(-0.5, abs=0.02) and cop.a == pytest.approx(40.0, abs=0.3)
+    rows = [W.Row(r.t, r.hod, r.day, r.temp, r.raw_temp, cop.heat(h)) for r, h in zip(temps, hp_rows)]
+    m = W.fit(rows, cooling=False, recent_days=7, now=now)
+    assert m.status == "active" and m.heat_kw_per_c == pytest.approx(0.3, abs=0.02)
+    W.set_typical(cop, hp_rows, now - timedelta(days=7))
+    # a cold spell: by the end the electricity is the heat at -2 degC over the COP at -2 degC
+    cold = [(now + timedelta(hours=h), -2.0) for h in range(0, 50)]
+    slots = [now + timedelta(minutes=30 * i) for i in range(96)]
+    adj = W.slot_adjustments(m, cold, temps[-1].temp, slots, timezone.utc, cop)
+    last = slots[-1]
+    hod = (last + timedelta(minutes=15)).hour
+    a, h, _, t = adj[int(last.timestamp())]
+    expected = 0.3 * 18.0 / W.carnot_cop(0.46, 41.0, -6.0)
+    assert t == -2.0 and a + cop.typical_heat[hod] / cop.typical_cop[hod] == pytest.approx(expected, rel=0.08)
+    # more than the same heat at the history's typical COP: the COP falls in the cold
+    assert expected > 0.3 * 18.0 / cop.typical_cop[hod]
+    # without a supply temperature there's nothing to learn the curve from
+    assert W.fit_cop([W.HeatPumpRow(r.t, r.hod, r.temp, r.elec) for r in hp_rows], 0.47) is None
+
+
+async def _weather_setup(hass, freezer, extra: dict | None = None, supply=None) -> dict:
+    """Set up with 21 days of synthetic heat pump history; returns the plan sensor's attributes.
+
+    ``supply``: optional function of the outdoor temperature, recorded as sensor.supply."""
     from homeassistant.components.recorder.models import StatisticMeanType
     from homeassistant.components.recorder.statistics import async_import_statistics
     from homeassistant.core import SupportsResponse
@@ -127,13 +162,19 @@ async def test_weather_sensors_and_plan(hass, recorder_mock, octopus_states, fre
     freezer.move_to(NOW)
     rows, _ = synth(days=21)
     shift = NOW.replace(minute=0) - (rows[-1].t + timedelta(hours=1))  # end the history at now
-    temp_rows, load_rows, house_rows = [], [], []
+    temp_rows, load_rows, house_rows, supply_rows = [], [], [], []
     for r in rows:
         temp_rows.append({"start": r.t + shift, "mean": r.raw_temp, "min": r.raw_temp, "max": r.raw_temp})
         load_rows.append({"start": r.t + shift, "mean": r.load * 1000, "min": 0, "max": 0})
         house_rows.append({"start": r.t + shift, "mean": (r.load + 0.5) * 1000, "min": 0, "max": 0})  # heat pump + 0.5 kW
-    for sid, unit, cls, data in (("sensor.outdoor", "°C", "temperature", temp_rows), ("sensor.heat_pump", "W", "power", load_rows),
-                                 ("sensor.house", "W", "power", house_rows)):
+        if supply:
+            v = supply(r.raw_temp)
+            supply_rows.append({"start": r.t + shift, "mean": v, "min": v, "max": v})
+    series = [("sensor.outdoor", "°C", "temperature", temp_rows), ("sensor.heat_pump", "W", "power", load_rows),
+              ("sensor.house", "W", "power", house_rows)]
+    if supply:
+        series.append(("sensor.supply", "°C", "temperature", supply_rows))
+    for sid, unit, cls, data in series:
         hass.states.async_set(sid, "1", {"unit_of_measurement": unit, "state_class": "measurement", "device_class": cls})
         meta = {"source": "recorder", "statistic_id": sid, "name": None, "unit_of_measurement": unit, "has_mean": True,
                 "mean_type": StatisticMeanType.ARITHMETIC, "has_sum": False, "unit_class": cls}
@@ -148,14 +189,18 @@ async def test_weather_sensors_and_plan(hass, recorder_mock, octopus_states, fre
 
     hass.services.async_register("weather", "get_forecasts", forecasts, supports_response=SupportsResponse.ONLY)
     opts = flat(SETTINGS) | {"weather_entity": "weather.home", "outdoor_temp_entity": "sensor.outdoor", "load_entities": ["sensor.house"],
-                             "weather_load_entities": ["sensor.heat_pump"], "weather_cooling": False, "weather_days": 21}
+                             "weather_load_entities": ["sensor.heat_pump"], "weather_cooling": False, "weather_days": 21} | (extra or {})
     entry = MockConfigEntry(domain=DOMAIN, title="Battery Plan", data={"name": "Battery Plan"}, options=opts)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    return dict(hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes)
 
-    a = hass.states.get("sensor.battery_plan_soc_at_next_charge").attributes
+
+async def test_weather_sensors_and_plan(hass, recorder_mock, octopus_states, freezer) -> None:
+    a = await _weather_setup(hass, freezer)
     wm = a["weather_model"]
+    assert wm["basis"] == "electricity" and wm["heat_pump"] is None
     assert wm["status"] == "active", wm
     assert wm["heating_kw_per_c"] == pytest.approx(0.1, abs=0.02)
     assert wm["temperature_source"] == "sensor.outdoor"
@@ -172,6 +217,22 @@ async def test_weather_sensors_and_plan(hass, recorder_mock, octopus_states, fre
     assert len(wm["hour_weights"]) == 24
     assert all("ht" in x and x["ld"] - x["ht"] == pytest.approx(0.5, abs=0.02) for x in f[:40])
     assert tomorrow["heating_kwh"] > tomorrow["weather_kwh"]
+
+
+async def test_heat_pump_cop_model(hass, recorder_mock, octopus_states, freezer) -> None:
+    """With a supply temperature the model is learned on heat and forecast through the COP."""
+    a = await _weather_setup(hass, freezer, {"hp_supply_entity": "sensor.supply", "hp_cop_ratio": 0.45},
+                             supply=lambda t: 40.0 - 0.5 * t)
+    wm = a["weather_model"]
+    assert wm["status"] == "active" and wm["basis"] == "heat", wm
+    hp = wm["heat_pump"]
+    assert hp["cop_ratio"] == 0.45 and not hp["cop_ratio_learned"]
+    assert hp["supply_per_c"] == pytest.approx(-0.5, abs=0.05) and hp["supply_at_0c"] == pytest.approx(40.0, abs=0.5)
+    assert hp["cop_at"]["0"] < hp["cop_at"]["10"]
+    f = a["forecast"]
+    # still part of the house load (0.5 kW besides the heat pump), the heat pump's share through the COP
+    assert all("ht" in x and x["ld"] - x["ht"] == pytest.approx(0.5, abs=0.02) for x in f[:40])
+    assert f[30]["wh"] > 0.2
 
 
 async def test_no_weather_entity_no_sensors(hass, recorder_mock, octopus_states, freezer) -> None:

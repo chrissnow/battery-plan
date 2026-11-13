@@ -140,14 +140,20 @@
               "outdoor_temp_entity": "Outdoor temperature sensor",
               "weather_load_entities": "Weather-dependent loads",
               "weather_cooling": "Learn cooling too",
-              "weather_days": "Days to learn weather from"
+              "weather_days": "Days to learn weather from",
+              "hp_supply_entity": "Heat pump supply temperature",
+              "hp_output_entities": "Heat pump heat output",
+              "hp_cop_ratio": "Heat pump COP ratio"
             },
             "data_description": {
               "weather_entity": "Optional: a weather entity with hourly forecasts. Turns on weather-dependent load: the house load is adjusted for the forecast temperature, learned from your own history.",
               "outdoor_temp_entity": "Optional: an outdoor temperature sensor to learn from. Without it, the weather entity's recorded temperature is used.",
               "weather_load_entities": "Optional: power sensors for heating or cooling (e.g. heat pump input power). Without them, the effect is learned from the whole-house load. Leave out hot water if it runs off-peak.",
               "weather_cooling": "Also learn extra load in hot weather (air conditioning).",
-              "weather_days": "How many days of history to learn the temperature effect from."
+              "weather_days": "How many days of history to learn the temperature effect from.",
+              "hp_supply_entity": "Optional, heat pumps: the supply (flow) temperature or its weather-compensation setpoint. Turns on the COP model: heat is learned instead of electricity, the weather curve is learned from this sensor, and electricity is forecast as heat ÷ COP, which falls in the cold. The weather-dependent loads must be the heat pumps' heating input power (several units on one circuit count as one system).",
+              "hp_output_entities": "Optional, with the supply temperature: heat output sensors (kW of heat) for the same heat pumps. The COP ratio is then learned from them.",
+              "hp_cop_ratio": "COP as a share of the ideal (Carnot) COP, from the data sheet (typically 0.45-0.5). Used when there are no heat output sensors."
             }
           },
           "solar": {
@@ -386,14 +392,20 @@
               "outdoor_temp_entity": "Outdoor temperature sensor",
               "weather_load_entities": "Weather-dependent loads",
               "weather_cooling": "Learn cooling too",
-              "weather_days": "Days to learn weather from"
+              "weather_days": "Days to learn weather from",
+              "hp_supply_entity": "Heat pump supply temperature",
+              "hp_output_entities": "Heat pump heat output",
+              "hp_cop_ratio": "Heat pump COP ratio"
             },
             "data_description": {
               "weather_entity": "Optional: a weather entity with hourly forecasts. Turns on weather-dependent load: the house load is adjusted for the forecast temperature, learned from your own history.",
               "outdoor_temp_entity": "Optional: an outdoor temperature sensor to learn from. Without it, the weather entity's recorded temperature is used.",
               "weather_load_entities": "Optional: power sensors for heating or cooling (e.g. heat pump input power). Without them, the effect is learned from the whole-house load. Leave out hot water if it runs off-peak.",
               "weather_cooling": "Also learn extra load in hot weather (air conditioning).",
-              "weather_days": "How many days of history to learn the temperature effect from."
+              "weather_days": "How many days of history to learn the temperature effect from.",
+              "hp_supply_entity": "Optional, heat pumps: the supply (flow) temperature or its weather-compensation setpoint. Turns on the COP model: heat is learned instead of electricity, the weather curve is learned from this sensor, and electricity is forecast as heat ÷ COP, which falls in the cold. The weather-dependent loads must be the heat pumps' heating input power (several units on one circuit count as one system).",
+              "hp_output_entities": "Optional, with the supply temperature: heat output sensors (kW of heat) for the same heat pumps. The COP ratio is then learned from them.",
+              "hp_cop_ratio": "COP as a share of the ideal (Carnot) COP, from the data sheet (typically 0.45-0.5). Used when there are no heat output sensors."
             }
           },
           "solar": {

@@ -4,7 +4,7 @@ Home Assistant custom integration (HACS). It plans a home battery's overnight ch
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
 and an all-day ESS charge schedule's target SOC. With a solar forecast it plans PV too and
-lowers the overnight target to leave room for the sun. Current version: **0.7.2**.
+lowers the overnight target to leave room for the sun. Current version: **0.8.0**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -29,7 +29,7 @@ file.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements_test.txt
-TZ=Europe/London pytest -q                 # 80 tests, ~55 s (Linux/macOS: the HA plugin needs fcntl)
+TZ=Europe/London pytest -q                 # 82 tests, ~55 s (Linux/macOS: the HA plugin needs fcntl)
 pytest --noconftest tests/test_planner.py  # planner only, no Home Assistant needed (works on Windows)
 ```
 
@@ -69,7 +69,7 @@ Test gotchas learned the hard way:
 | `solar.py` | Pure solar maths: energy-platform Wh/hour → kW per half hour (`slot_kw`), `calibrate` (bias = median actual/forecast, dull day = 20th percentile / bias, after ≥5 days), `nowcast` (rest of today from today's actual so far, weighted by the share of the day passed), `apply`. |
 | `solar_inputs.py` | `SolarInputsMixin`: the forecast from the chosen integration's `energy` platform (`async_get_solar_forecast`, as the Energy dashboard uses; cached 30 min), a Store of each day's forecast as it stood by 06:00 with that day's actual from the PV sensor's statistics (energy change, or power means), calibration and nowcast. Publishes the `solar` attribute. |
 | `helpers.py` | `_as_dt`, `_float`, `_secs`, `BAD` (shared parsing helpers). |
-| `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points (scaled per hour by the heating sensors' recent profile when there are some, `hour_weights`), temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
+| `weather_load.py` | Pure weather-dependent load model: per-hour baseline + heating (and optional cooling) kW/°C past learned balance points (scaled per hour by the heating sensors' recent profile when there are some, `hour_weights`), optional heat pump COP model (`fit_cop`: weather curve for the supply temperature, data-sheet COP ratio; learns heat, forecasts heat ÷ COP), temperature smoothed over 6 h, quality gates (≥7 days, ≥48 active hours, ≥3 % variance explained, sensitivity ≤ 3 kW/°C). `slot_adjustments()` turns an hourly forecast into per-slot load adjustments. |
 | `control.py` | `Controller`: every 30 s `compute()` builds a `_Ctx`, then `_charge_current` (spread in the window; spread during IOG top-ups to finish 15 min early; BMS capacity; planned rate in free sessions and charges bought ahead), `_charge_schedule_soc` (target for an all-day ESS schedule: raised for dispatches/free sessions/bought-ahead charges and optionally the window, else parked), `_setpoint` (SOC-tracking exports per half hour, held for the last minutes; overrides, export floor, saving sessions, hold = live load, idle/charge setpoints). Two independent switches (`setpoint_on`, `current_on`), configurable deadbands, revert on switch-off/unload/HA stop, EV inhibit relay, MQTT heartbeat. |
 | `sensor.py` | Plan sensors, cost sensors, control target/status sensors, battery action sensor (history drives the card's past bands), weather load today/tomorrow, heating sensitivity. Large attributes are in `BIG` (`_unrecorded_attributes`). |
 | `switch.py` / `select.py` / `number.py` / `binary_sensor.py` | Control switches (setpoint keeps unique id `<entry>_control`; both restore their state), override select, custom setpoint, EV inhibit and final-IOG-slot binary sensors. |
@@ -87,6 +87,27 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.8.0: heat pump COP model
+
+- Optional (Weather section, with dedicated heating sensors): `hp_supply_entity` (supply/flow
+  temperature or its weather-compensation setpoint), `hp_output_entities` (heat output sensors) and
+  `hp_cop_ratio` (default 0.47). Several units on one circuit (staged) are one system: summed.
+- COP = ratio x ideal (Carnot) COP, condensing at supply + 2 K, evaporating at outdoor - 4 K (fixed
+  coil gap; the ratio absorbs the rest). `fit_cop` learns the weather curve from history (supply = a +
+  b x outdoor + a shrunk offset per hour of day, clamped to the range seen) and, with heat output
+  sensors, the ratio their figures imply. The weather model is then fitted on heat (electricity x
+  COP, or the output sensors) and `slot_adjustments(..., cop)` gives each slot's electricity change as
+  heat_fc / COP_fc - typical heat / typical COP (both by hour, over `load_days`), so the profile stays
+  the anchor. `wh`/`wc` are electricity. Plan attribute `weather_model.basis` = heat | electricity,
+  `weather_model.heat_pump` = the curve, ratio and COP at -5/0/5/10 C. Without a supply sensor
+  nothing changes.
+- Replay, Chris 5-13 Nov (both IVTs, setpoint as supply, integration code, actual temperatures):
+  hourly error 0.201 -> 0.178 kW; 12 Nov 23.0 -> 25.7 kWh (actual 33.3), 13 Nov 25.1 -> 28.0 (33.9).
+  With the setpoint as supply the learned ratio is ~0.36 (the outlet runs above the setpoint); the
+  outlet sensors record statistics from 13 Nov and can replace it later. Fixed ratio 0.47 without
+  output sensors: 0.192.
+- Chris's HA COP sensors are data-sheet based (0.464 IVT-10, 0.479 IVT-22), not measured.
 
 ## 0.7.2: past heating stacked too (card)
 

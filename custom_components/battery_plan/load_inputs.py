@@ -3,6 +3,7 @@ dispatch / session / grid-charge masking) and the weather-dependent load model's
 forecast. A mixin of the coordinator, moved out of coordinator.py unchanged."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
 
@@ -12,6 +13,9 @@ from . import weather_load as W
 from .const import (
     CONF_DISPATCHING_ENTITY,
     CONF_FREE_CALENDAR,
+    CONF_HP_COP_RATIO,
+    CONF_HP_OUTPUT_ENTITIES,
+    CONF_HP_SUPPLY_ENTITY,
     CONF_LOAD_DAYS,
     CONF_LOAD_ENTITIES,
     CONF_LOAD_EXCLUDE,
@@ -43,6 +47,25 @@ class LoadInputsMixin:
         return await get_instance(self.hass).async_add_executor_job(
             statistics_during_period, self.hass, start, end, ids, period, {"power": "kW"}, {"mean"}
         )
+
+    async def _hourly_means(self, ids: set[str], start: datetime, end: datetime, units: dict) -> dict[str, dict[int, float]]:
+        """Hourly statistics means: entity -> hour start (epoch) -> value."""
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistics_during_period
+
+        stats = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period, self.hass, start, end, ids, "hour", units, {"mean"}
+        )
+        out: dict[str, dict[int, float]] = {}
+        for eid in ids:
+            out[eid] = {}
+            for row in stats.get(eid, []):
+                st, m = row.get("start"), row.get("mean")
+                if st is None or m is None:
+                    continue
+                ts = st.timestamp() if isinstance(st, datetime) else float(st)
+                out[eid][int(ts)] = float(m)
+        return out
 
     @staticmethod
     def _buckets(rows: list[dict], hourly: bool, masked: set[int] | None = None) -> list[float | None]:
@@ -224,7 +247,7 @@ class LoadInputsMixin:
 
     async def _weather_inputs(self, now: datetime, horizon: int) -> dict[int, tuple[float, float, float, float]]:
         if not self.opts.get(CONF_WEATHER_ENTITY):
-            self.weather_model = None
+            self.weather_model = self.cop_model = None
             return {}
         if self._w_fit_at is None or now - self._w_fit_at >= WEATHER_FIT_REFRESH:
             try:
@@ -232,6 +255,7 @@ class LoadInputsMixin:
             except Exception as err:  # noqa: BLE001 - never block the plan over the weather model
                 _LOGGER.warning("Battery Plan could not learn the weather-dependent load: %s", err)
                 self.weather_model = W.WeatherModel(status="not_enough_data", reason=f"error: {err}")
+                self.cop_model = None
             self._w_fit_at = now
         if self._w_forecast_at is None or now - self._w_forecast_at >= WEATHER_FORECAST_REFRESH:
             self._w_forecast = await self._weather_forecast()
@@ -242,7 +266,7 @@ class LoadInputsMixin:
         start0 = datetime.fromtimestamp(int(now.timestamp()) // 1800 * 1800, timezone.utc)
         slots = [start0 + timedelta(minutes=30 * i) for i in range(horizon)]
         active = bool(self.weather_model and self.weather_model.active)
-        adj = W.slot_adjustments(self.weather_model, self._w_forecast, self._w_last_sm, slots, tz) if active else {}
+        adj = W.slot_adjustments(self.weather_model, self._w_forecast, self._w_last_sm, slots, tz, self.cop_model) if active else {}
         hp = self._heat_profile if self._heating_ids() else None
         if not hp:
             return adj
@@ -348,10 +372,20 @@ class LoadInputsMixin:
         except Exception:  # noqa: BLE001
             masked = set()
         whole_house = not o.get(CONF_WEATHER_LOAD_ENTITIES)
+        # heat pumps with a supply temperature: learn heat (electricity x COP), forecast through the COP
+        supply_id = None if whole_house else o.get(CONF_HP_SUPPLY_ENTITY)
+        outs = list(o.get(CONF_HP_OUTPUT_ENTITIES) or []) if supply_id else []
+        supply: dict[int, float] = {}
+        heat_out: dict[str, dict[int, float]] = {}
+        if supply_id:
+            supply = (await self._hourly_means({supply_id}, start, now, {"temperature": "°C"})).get(supply_id, {})
+            if outs:
+                heat_out = await self._hourly_means(set(outs), start, now, {"power": "kW"})
         tz = dt_util.get_default_time_zone()
         hours = sorted(temps)
         smoothed = dict(W.smooth([(datetime.fromtimestamp(h, timezone.utc), temps[h]) for h in hours]))
         rows: list[W.Row] = []
+        hp_rows: list[W.HeatPumpRow] = []
         past: dict[str, float] = {}
         for h in hours:
             t = datetime.fromtimestamp(h, timezone.utc)
@@ -364,10 +398,19 @@ class LoadInputsMixin:
                 if not (whole_house and self._in_charge_window(t + timedelta(minutes=30))):
                     load = sum(per[e][h] for e in ids) - sum(per[e].get(h, 0.0) for e in excl)
                     rows.append(W.Row(t, loc.hour, loc.date().isoformat(), sm, temps[h], max(0.0, load)))
+                    if supply_id:
+                        out_kw = sum(max(0.0, heat_out[e][h]) for e in outs) if outs and all(h in heat_out.get(e, {}) for e in outs) else None
+                        hp_rows.append(W.HeatPumpRow(t, loc.hour, temps[h], max(0.0, load), supply.get(h), out_kw))
             past.setdefault(loc.date().isoformat(), 0.0)
         # dedicated heating sensors: scale each hour by its share of their recent energy
         weights = W.hour_weights(self._heat_profile) if not whole_house and self._heat_profile else None
+        cop = W.fit_cop(hp_rows, float(o.get(CONF_HP_COP_RATIO) or 0.47)) if supply_id else None
+        if cop:
+            rows = [replace(r, load=cop.heat(hr)) for r, hr in zip(rows, hp_rows)]
         self.weather_model = W.fit(rows, bool(o.get(CONF_WEATHER_COOLING)), int(o[CONF_LOAD_DAYS]), now, weights)
+        if cop:
+            W.set_typical(cop, hp_rows, now - timedelta(days=int(o[CONF_LOAD_DAYS])))
+        self.cop_model = cop if cop and self.weather_model.active else None
         self._w_last_sm = smoothed[datetime.fromtimestamp(hours[-1], timezone.utc)] if hours else None
 
     async def _weather_today(self, now: datetime) -> None:
@@ -377,11 +420,14 @@ class LoadInputsMixin:
         temps = await self._hourly_temps(today0 - timedelta(hours=24), now)
         hours = sorted(temps)
         sm = W.smooth([(datetime.fromtimestamp(h, timezone.utc), temps[h]) for h in hours])
-        m = self.weather_model
-        done = sum(
-            m.heat_kw(v, t.astimezone(tz).hour) + m.cool_kw(v, t.astimezone(tz).hour)
-            for t, v in sm if v is not None and t >= today0 and t + timedelta(hours=1) <= now
-        )
+        m, cop = self.weather_model, self.cop_model
+
+        def elec(t: datetime, v: float) -> float:
+            hod = t.astimezone(tz).hour
+            kw = m.heat_kw(v, hod) + m.cool_kw(v, hod)
+            return kw / cop.cop(v, hod) if cop else kw
+
+        done = sum(elec(t, v) for t, v in sm if v is not None and t >= today0 and t + timedelta(hours=1) <= now)
         self._w_past = {today0.date().isoformat(): done}
         if sm and sm[-1][1] is not None:
             self._w_last_sm = sm[-1][1]

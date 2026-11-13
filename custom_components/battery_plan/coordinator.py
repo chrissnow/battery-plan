@@ -100,6 +100,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, SolarInputsMixin, DataUpdateCoordi
         self._load_masked = 0
         self._heat_profile: list[float] | None = None  # dedicated heating sensors' half-hourly kW
         self.weather_model: W.WeatherModel | None = None
+        self.cop_model: W.CopModel | None = None  # heat pumps with a supply temperature
         self._w_fit_at: datetime | None = None
         self._w_last_sm: float | None = None
         self._w_past: dict[str, float] = {}  # local day -> weather kWh already happened
@@ -408,6 +409,9 @@ class BatteryPlanCoordinator(LoadInputsMixin, SolarInputsMixin, DataUpdateCoordi
                 "temperature_source": self._w_source,
                 "load_entities": ids,
                 "forecast_hours": len(self._w_forecast),
+                # with a heat pump COP model the fit (sensitivity, daily points) is in kW / kWh of heat
+                "basis": "heat" if self.cop_model else "electricity",
+                "heat_pump": self.cop_model.as_dict() if self.cop_model else None,
             }
             tz = dt_util.get_default_time_zone()
             today = now.astimezone(tz).date()

@@ -514,9 +514,15 @@ class BatteryPlanCard extends HTMLElement {
     let status;
     if (wm.status === 'active') {
       const parts = [];
-      if (wm.heating_kw_per_c) parts.push(`+${wm.heating_kw_per_c.toFixed(3)} kW per °C below ${wm.heating_below_c}°C`);
-      if (wm.cooling_kw_per_c) parts.push(`+${wm.cooling_kw_per_c.toFixed(3)} kW per °C above ${wm.cooling_above_c}°C`);
+      const unit = wm.basis === 'heat' ? 'kW of heat' : 'kW';
+      if (wm.heating_kw_per_c) parts.push(`+${wm.heating_kw_per_c.toFixed(3)} ${unit} per °C below ${wm.heating_below_c}°C`);
+      if (wm.cooling_kw_per_c) parts.push(`+${wm.cooling_kw_per_c.toFixed(3)} ${unit} per °C above ${wm.cooling_above_c}°C`);
       status = `Active: ${parts.join(', ')} · learned from ${wm.days} days${wm.fit_gain != null ? ` · explains ${Math.round(wm.fit_gain * 100)}% of the hour-to-hour variation` : ''}`;
+      const hp = wm.heat_pump;
+      if (hp) {
+        const cops = Object.entries(hp.cop_at || {}).map(([t, c]) => `${c} at ${t}°C`).join(', ');
+        status += `<br>Heat pump: electricity = heat ÷ COP. Supply ${hp.supply_at_0c}°C at 0°C, ${hp.supply_per_c} K per °C; COP ${cops} (${hp.cop_ratio} of ideal${hp.cop_ratio_learned ? ', learned' : ''}).`;
+      }
     } else {
       status = `Not in use yet: ${wm.reason || 'learning'}. The plan uses the plain load schedule.`;
     }
@@ -538,7 +544,7 @@ class BatteryPlanCard extends HTMLElement {
       for (let t = Math.ceil(tmin); t <= tmax; t += Math.max(1, Math.round((tmax - tmin) / 6))) ax += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle" class="lbl">${t}°</text>`;
       for (const k of [0, Math.round(kmax / 2), kmax]) ax += `<line x1="${L}" x2="${W - R}" y1="${y(k)}" y2="${y(k)}" class="g"/><text x="${L - 6}" y="${y(k) + 4}" text-anchor="end" class="lbl">${k}</text>`;
       chart = `<svg viewBox="0 0 ${W} ${H}" style="max-width:${W}px">${ax}${line}${pts.map(p => `<circle class="pt" cx="${x(p.t)}" cy="${y(p.kwh)}" r="4"><title>${p.d}: ${p.kwh} kWh at ${p.t}°C</title></circle>`).join('')}
-        <text x="${L + 4}" y="${T - 4}" class="lbl">kWh/day</text><text x="${W - R}" y="${T - 4}" text-anchor="end" class="lbl">vs average outdoor °C</text></svg>
+        <text x="${L + 4}" y="${T - 4}" class="lbl">${wm.basis === 'heat' ? 'kWh heat/day' : 'kWh/day'}</text><text x="${W - R}" y="${T - 4}" text-anchor="end" class="lbl">vs average outdoor °C</text></svg>
         <div>Each dot is one day's load from the sensors the model learns from; the line is what it expects at that temperature.</div>`;
     }
     return `<details class="model"${open}><summary>Weather model · ${wm.status === 'active' ? 'active' : 'not in use yet'}</summary><div>${status}</div>${chart}</details>`;

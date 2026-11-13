@@ -289,17 +289,138 @@ def interp(series: list[tuple[datetime, float]], t: datetime) -> float | None:
     return v0 + (v1 - v0) * (t - t0).total_seconds() / (t1 - t0).total_seconds()
 
 
+# ---------- heat pumps: learn heat, forecast electricity through the COP ----------
+#
+# A heat pump's electricity is the heat the house needs divided by its COP, and the COP falls as
+# it gets colder: the weather curve raises the supply temperature and the coil runs colder. The
+# heat loss is the part that is linear in the outdoor temperature, so with a supply temperature
+# sensor the model above is fitted on heat (electricity x COP) and the forecast is divided by the
+# COP forecast for each hour. The COP is the data-sheet form: a share (``ratio``, ~0.45-0.5) of
+# the ideal (Carnot) COP between the condensing (supply + 2 K) and evaporating temperatures; the coil
+# is taken as COIL_GAP below the outdoor temperature (a fixed gap: the learned ratio absorbs the rest).
+# Several units on one circuit are one system: their electricity (and heat) are summed.
+
+COND_OFFSET = 2.0  # K: condensing temperature above the supply water
+COIL_GAP = 4.0  # K: evaporating (coil) temperature below the outdoor temperature
+RUN_KW = 0.3  # an hour counts as running at this mean electrical input or more
+MIN_RUN_HOURS = 24
+
+
+def carnot_cop(ratio: float, supply: float, evap: float) -> float:
+    """``ratio`` x the ideal heating COP, condensing at ``supply`` + COND_OFFSET, evaporating at ``evap``."""
+    tc = supply + COND_OFFSET + 273.15
+    return ratio * tc / max(5.0, tc - (evap + 273.15))
+
+
+@dataclass
+class HeatPumpRow:
+    """One hour of heat pump history."""
+
+    t: datetime  # hour start, UTC
+    hod: int  # local hour of day
+    temp: float  # outdoor temperature (raw)
+    elec: float  # kW in, all units
+    supply: float | None = None  # supply temperature (setpoint or flow), degC
+    heat: float | None = None  # kW out, all units, where the user's own sensors give it
+
+
+@dataclass
+class CopModel:
+    """Supply temperature by weather curve and COP ratio, learned from history."""
+
+    ratio: float
+    ratio_learned: bool
+    a: float  # supply = a + b * outdoor + offset[hour], within [lo, hi]
+    b: float
+    offset: list[float]
+    lo: float
+    hi: float
+    hours: int  # running hours learned from
+    typical_cop: list[float] = field(default_factory=lambda: [0.0] * 24)  # recent days, by hour
+    typical_heat: list[float] = field(default_factory=lambda: [0.0] * 24)  # kW heat, recent days, by hour
+
+    def supply(self, temp: float, hod: int) -> float:
+        return min(self.hi, max(self.lo, self.a + self.b * temp + self.offset[hod]))
+
+    def cop(self, temp: float, hod: int) -> float:
+        return carnot_cop(self.ratio, self.supply(temp, hod), temp - COIL_GAP)
+
+    def heat(self, row: HeatPumpRow) -> float:
+        """The hour's heat output: the user's own figure, else electricity x COP at what it ran at."""
+        if row.heat is not None:
+            return row.heat
+        if row.supply is not None:
+            return row.elec * carnot_cop(self.ratio, row.supply, row.temp - COIL_GAP)
+        return row.elec * self.cop(row.temp, row.hod)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cop_ratio": round(self.ratio, 3),
+            "cop_ratio_learned": self.ratio_learned,
+            "supply_at_0c": round(self.a, 1),
+            "supply_per_c": round(self.b, 2),
+            "supply_range": [round(self.lo, 1), round(self.hi, 1)],
+            "running_hours": self.hours,
+            "cop_at": {str(t): round(self.cop(t, 12), 2) for t in (-5, 0, 5, 10)},
+        }
+
+
+def fit_cop(rows: list[HeatPumpRow], ratio: float) -> CopModel | None:
+    """Learn the weather curve (supply against outdoor, plus an offset per hour of day) and, where
+    the user's sensors give heat, the COP ratio their figures imply."""
+    run = [r for r in rows if r.elec >= RUN_KW and r.supply is not None]
+    if len(run) < MIN_RUN_HOURS:
+        return None
+    n = len(run)
+    mx = sum(r.temp for r in run) / n
+    my = sum(r.supply for r in run) / n
+    sxx = sum((r.temp - mx) ** 2 for r in run)
+    b = sum((r.temp - mx) * (r.supply - my) for r in run) / sxx if sxx > 1e-6 else 0.0
+    b = min(0.0, b)  # supply never rises with the outdoor temperature
+    a = my - b * mx
+    res: list[list[float]] = [[] for _ in range(24)]
+    for r in run:
+        res[r.hod].append(r.supply - a - b * r.temp)
+    # an hour's own offset, shrunk towards none when it has few running hours
+    offset = [sum(v) / (len(v) + 3) if v else 0.0 for v in res]
+    m = CopModel(ratio=ratio, ratio_learned=False, a=a, b=b, offset=offset,
+                 lo=min(r.supply for r in run), hi=max(r.supply for r in run), hours=n)
+    known = [r for r in run if r.heat is not None]
+    if len(known) >= MIN_RUN_HOURS:
+        ideal = sum(r.elec * carnot_cop(1.0, r.supply, r.temp - COIL_GAP) for r in known)
+        if ideal > 0:
+            m.ratio = min(0.8, max(0.2, sum(r.heat for r in known) / ideal))
+            m.ratio_learned = True
+    return m
+
+
+def set_typical(cop: CopModel, rows: list[HeatPumpRow], since: datetime) -> None:
+    """Typical heat and COP by hour over the recent days (the load profile's days)."""
+    heat: list[list[float]] = [[] for _ in range(24)]
+    cops: list[list[float]] = [[] for _ in range(24)]
+    for r in rows:
+        if r.t >= since:
+            heat[r.hod].append(cop.heat(r))
+            cops[r.hod].append(cop.cop(r.temp, r.hod))
+    cop.typical_heat = [sum(v) / len(v) if v else 0.0 for v in heat]
+    cop.typical_cop = [sum(v) / len(v) if v else cop.cop(5.0, h) for h, v in enumerate(cops)]
+
+
 def slot_adjustments(
     model: WeatherModel,
     forecast: list[tuple[datetime, float]],
     last_smoothed: float | None,
     slots: list[datetime],
     tz: tzinfo,
+    cop: CopModel | None = None,
 ) -> dict[int, tuple[float, float, float, float]]:
     """Per half-hour slot start (epoch): (load adjustment kW, heating kW, cooling kW, forecast temp).
 
     ``forecast`` is hourly (UTC time, degC); it's smoothed on from the last
     observed smoothed temperature so it matches what the model learned from.
+    With a heat pump model (``model`` fitted on heat): the slot's heat (typical
+    heat at that hour moved by the weather) over its forecast COP, less the
+    typical heat over the typical COP; heating/cooling kW are then electricity.
     """
     out: dict[int, tuple[float, float, float, float]] = {}
     if not model.active or not forecast:
@@ -314,5 +435,12 @@ def slot_adjustments(
             continue
         hod = mid.astimezone(tz).hour
         h, c = model.heat_kw(ts, hod), model.cool_kw(ts, hod)
-        out[int(s.timestamp())] = (h + c - model.typical_kw[hod], h, c, tr if tr is not None else ts)
+        temp = tr if tr is not None else ts
+        if cop is not None:
+            f = cop.cop(temp, hod)
+            heat = max(0.0, cop.typical_heat[hod] + h + c - model.typical_kw[hod])
+            typical = cop.typical_heat[hod] / cop.typical_cop[hod]
+            out[int(s.timestamp())] = (heat / f - typical, h / f, c / f, temp)
+            continue
+        out[int(s.timestamp())] = (h + c - model.typical_kw[hod], h, c, temp)
     return out
