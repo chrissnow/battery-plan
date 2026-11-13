@@ -121,7 +121,8 @@ PLAN_SENSORS: tuple[PlanSensorDescription, ...] = (
     PlanSensorDescription(
         key="soc_at_next_charge",
         translation_key="soc_at_next_charge",
-        device_class=SensorDeviceClass.BATTERY,
+        # No battery device class: HA would show a forecast as the device's battery level.
+        icon="mdi:battery-clock",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda c: c.data["soc_at_next_charge"],
@@ -131,7 +132,7 @@ PLAN_SENSORS: tuple[PlanSensorDescription, ...] = (
     PlanSensorDescription(
         key="min_soc_ahead",
         translation_key="min_soc_ahead",
-        device_class=SensorDeviceClass.BATTERY,
+        icon="mdi:battery-arrow-down",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda c: c.data["min_soc_ahead"],
@@ -363,7 +364,7 @@ class ControlSensor(SensorEntity):
             self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
             self._attr_state_class = SensorStateClass.MEASUREMENT
         elif key == "target_charge_soc":
-            self._attr_device_class = SensorDeviceClass.BATTERY
+            self._attr_icon = "mdi:battery-charging-high"
             self._attr_native_unit_of_measurement = PERCENTAGE
             self._attr_state_class = SensorStateClass.MEASUREMENT
         else:
