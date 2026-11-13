@@ -401,6 +401,7 @@ class BatteryPlanCoordinator(LoadInputsMixin, SolarInputsMixin, DataUpdateCoordi
         ids, excl = self._weather_load_ids()
         result["load_entities"] = list(self.opts.get(CONF_LOAD_ENTITIES) or [])
         result["load_exclude"] = [e for e in self.opts.get(CONF_LOAD_EXCLUDE) or [] if e not in result["load_entities"]]
+        result["heating_entities"] = self._heating_ids()  # part of the house load; the card splits it out
         if self.opts.get(CONF_WEATHER_ENTITY):
             m = self.weather_model or W.WeatherModel(status="not_enough_data", reason="learning")
             result["weather_model"] = m.as_dict() | {

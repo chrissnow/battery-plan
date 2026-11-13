@@ -4,7 +4,7 @@ Home Assistant custom integration (HACS). It plans a home battery's overnight ch
 evening exports against Octopus Energy tariffs, forecasts SOC and daily costs, ships a
 Lovelace card, and can optionally drive a Victron ESS grid setpoint, DVCC charge current
 and an all-day ESS charge schedule's target SOC. With a solar forecast it plans PV too and
-lowers the overnight target to leave room for the sun. Current version: **0.7.1**.
+lowers the overnight target to leave room for the sun. Current version: **0.7.2**.
 
 The reference install is a Victron Quattro + Cerbo GX system with a large LiFePO4 bank,
 DC chargers on the AC output that only charge inside ESS scheduled-charge windows,
@@ -87,6 +87,14 @@ Test gotchas learned the hard way:
   the reference install, 9 Nov 2026; the 7-day profile clears over a week), or add a charger
   power sensor (DC volts × amps ÷ efficiency) to the load exclusions.
 - The manifest has no `categories`; HACS only warns about it.
+
+## 0.7.2: past heating stacked too (card)
+
+- The plan publishes `heating_entities`; the card fetches their 5-minute statistics with the load
+  sensors' and stacks the past half hours as house + heating (bars before now, actual load line on
+  top). Tooltip: "Load 2.1 kW actual (0.8 house + 1.3 heating)". Without heating sensors the past is
+  the load line only, as before.
+- The actual SOC history gets a faint neutral fill under it, like the forecast's blue fill.
 
 ## 0.7.1: heating by hour of day; heating shown apart from the house
 

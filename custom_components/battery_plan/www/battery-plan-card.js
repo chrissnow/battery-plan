@@ -97,17 +97,18 @@ class BatteryPlanCard extends HTMLElement {
     this._loadActual();
   }
 
-  // Actual house load per half hour (load sensors minus excluded), from 5-minute statistics.
+  // Actual house load per half hour (load sensors minus excluded), from 5-minute statistics:
+  // [start, kW, heating kW or null] (heating from the dedicated heating sensors, part of the load).
   async _loadActual() {
     const st = this._hass.states[this._config.entity];
     const a = (st && st.attributes) || {};
-    const inc = a.load_entities || [], exc = a.load_exclude || [];
+    const inc = a.load_entities || [], exc = a.load_exclude || [], heat = a.heating_entities || [];
     if (!this._config.show_load || !inc.length || !this._config.hours_past) return;
     try {
       const r = await this._hass.callWS({
         type: 'recorder/statistics_during_period',
         start_time: new Date(Date.now() - this._config.hours_past * 3600000).toISOString(),
-        statistic_ids: inc.concat(exc), period: '5minute', types: ['mean'], units: { power: 'kW' },
+        statistic_ids: [...new Set(inc.concat(exc, heat))], period: '5minute', types: ['mean'], units: { power: 'kW' },
       });
       const half = id => {
         const m = new Map();
@@ -118,12 +119,14 @@ class BatteryPlanCard extends HTMLElement {
         });
         return m;
       };
-      const incM = inc.map(half), excM = exc.map(half);
+      const incM = inc.map(half), excM = exc.map(half), heatM = heat.map(half);
       const keys = [...new Set(incM.flatMap(m => [...m.keys()]))].sort((p, q) => p - q);
       this._loadHist = keys.filter(k => incM.every(m => m.has(k))).map(k => {
         let v = incM.reduce((s, m) => s + m.get(k)[0] / m.get(k)[1], 0);
         excM.forEach(m => { if (m.has(k)) v -= m.get(k)[0] / m.get(k)[1]; });
-        return [k, Math.max(0, v)];
+        v = Math.max(0, v);
+        const h = heatM.length && heatM.every(m => m.has(k)) ? heatM.reduce((s, m) => s + m.get(k)[0] / m.get(k)[1], 0) : null;
+        return [k, v, h == null ? null : Math.min(h, v)];
       });
       this._render();
     } catch (e) { /* optional */ }
@@ -292,6 +295,9 @@ class BatteryPlanCard extends HTMLElement {
     const histPath = hist.length ? 'M' + hist.map(h => `${x(h[0]).toFixed(1)},${y(h[1]).toFixed(1)}`).join('L') + (isNaN(socNow) ? '' : `L${x(now)},${y(socNow)}`) : '';
     const fPts = (isNaN(socNow) ? [] : [[now, socNow]]).concat(pts.map(p => [p.t, p.soc]));
     const fPath = fPts.length ? 'M' + fPts.map(p => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join('L') : '';
+    // the actual SOC gets a fill too (neutral), so past and forecast read as one chart
+    const histEnd = hist.length ? (isNaN(socNow) ? hist[hist.length - 1][0] : now) : 0;
+    const histArea = histPath ? histPath + `L${x(histEnd).toFixed(1)},${y(0)}L${x(hist[0][0]).toFixed(1)},${y(0)}Z` : '';
     const area = fPts.length ? fPath + `L${x(fPts[fPts.length - 1][0])},${y(0)}L${x(fPts[0][0])},${y(0)}Z` : '';
     const legend = Object.keys(BP_COLORS).filter(m => pts.some(p => p.mode === m) || (this._past || []).some(q => q[2] === m && q[1] > t0))
       .map(m => `<span><i style="background:${BP_COLORS[m]}"></i>${BP_NAMES[m]}</span>`).join('');
@@ -313,6 +319,15 @@ class BatteryPlanCard extends HTMLElement {
       const nice = top <= 2 ? 2 : top <= 4 ? 4 : top <= 6 ? 6 : Math.ceil(top / 5) * 5;
       const ly = v => LT + (1 - v / nice) * (LH - LT - LB);
       let bars = '';
+      // the past, where the heating sensors have statistics: actual house and heating, stacked
+      lh.forEach(h => {
+        if (h[2] == null) return;
+        const a0 = Math.max(h[0], t0), a1 = Math.min(h[0] + 1800000, now);
+        if (a1 <= a0) return;
+        const x0 = x(a0) + 0.5, w = Math.max(0, x(a1) - x(a0) - 1), base = Math.max(0, h[1] - h[2]);
+        bars += `<rect x="${x0}" y="${ly(base)}" width="${w}" height="${ly(0) - ly(base)}" fill="${BP_BASE}" opacity=".3"/>`;
+        if (h[2] > 0.01) bars += `<rect x="${x0}" y="${ly(h[1])}" width="${w}" height="${ly(base) - ly(h[1])}" fill="${kindCol}" opacity=".5"/>`;
+      });
       pts.forEach((p, i) => {
         const s0 = i === 0 ? now : pts[i - 1].t, x0 = x(s0) + 0.5, w = Math.max(0, x(p.t) - x(s0) - 1);
         const tot = p.ht != null;
@@ -400,6 +415,7 @@ class BatteryPlanCard extends HTMLElement {
         .hist { fill:none; stroke: var(--primary-text-color, #444); stroke-width: 2; opacity: .55; }
         .fc { fill:none; stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; stroke-linejoin: round; }
         .area { fill: var(--primary-color, #03a9f4); opacity: .08; }
+        .harea { fill: var(--primary-text-color, #444); opacity: .06; }
         .leg { display:flex; flex-wrap:wrap; gap: 4px 14px; font-size: 12px; color: var(--secondary-text-color); margin-top: 4px; }
         .leg i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; opacity:.6; vertical-align:-1px; }
         .tip { position:absolute; pointer-events:none; background: var(--card-background-color, #fff); border:1px solid var(--divider-color);
@@ -435,7 +451,7 @@ class BatteryPlanCard extends HTMLElement {
         <div class="wrap">
           <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
             ${bands}${grid}${reserve}
-            <path d="${area}" class="area"/><path d="${histPath}" class="hist"/><path d="${fPath}" class="fc"/>
+            <path d="${histArea}" class="harea"/><path d="${area}" class="area"/><path d="${histPath}" class="hist"/><path d="${fPath}" class="fc"/>
             <line x1="${x(now)}" x2="${x(now)}" y1="${T}" y2="${H - B}" class="now"/>
             <text x="${x(now) + 4}" y="${T + 11}" class="lbl">now</text>
             <line id="cur" x1="0" x2="0" y1="${T}" y2="${H - B}" class="now" style="display:none"/>
@@ -475,7 +491,7 @@ class BatteryPlanCard extends HTMLElement {
         const pa = (this._past || []).find(q => q[0] <= t && t < q[1]);
         html = `<b>${this._fmtTime(t, true)}</b>${h ? ` · ${h[1].toFixed(1)}% actual` : ''}${pa ? `<br>${BP_NAMES[pa[2]] || pa[2]}` : ''}`;
         const la = lh.find(q => q[0] <= t && t < q[0] + 1800000);
-        if (showLoad && la) html += `<br>Load ${la[1].toFixed(1)} kW actual`;
+        if (showLoad && la) html += `<br>Load ${la[1].toFixed(1)} kW actual${la[2] != null ? ` (${(la[1] - la[2]).toFixed(1)} house + ${la[2].toFixed(1)} ${kindWord.toLowerCase()})` : ''}`;
       } else return;
       tip.innerHTML = html; tip.style.display = 'block';
       tip.style.left = Math.min(Math.max(0, px - tip.offsetWidth / 2), r.width - tip.offsetWidth) + 'px';
